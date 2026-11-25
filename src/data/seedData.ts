@@ -1,0 +1,481 @@
+import type { PosDataState, VariantGroup, ToppingOption } from '../types/pos';
+
+export const PRODUCT_IMAGES = {
+  espresso: '/src/assets/images/menu_espresso_1795579206194.jpg',
+  americano: '/src/assets/images/menu_americano_1795579207134.jpg',
+  cafeLatte: '/src/assets/images/menu_cafe_latte_1795579208902.jpg',
+  cappuccino: '/src/assets/images/menu_cappuccino_1795579209449.jpg',
+  esKopiSusu: '/src/assets/images/menu_es_kopi_susu_1795579209110.jpg',
+  matchaLatte: '/src/assets/images/menu_matcha_latte_1795579211123.jpg',
+  chocolate: '/src/assets/images/menu_chocolate_1795579212142.jpg',
+  croissant: '/src/assets/images/menu_croissant_1795579212528.jpg',
+} as const;
+
+const sizeVariantGroup: VariantGroup = {
+  id: 'vg-size',
+  name: 'Ukuran',
+  required: true,
+  options: [
+    { id: 'size-reg', label: 'Regular (12 oz)', priceDelta: 0 },
+    { id: 'size-lrg', label: 'Large (16 oz)', priceDelta: 5000 },
+  ],
+};
+
+const tempVariantGroup: VariantGroup = {
+  id: 'vg-temp',
+  name: 'Penyajian',
+  required: true,
+  options: [
+    { id: 'temp-iced', label: 'Iced', priceDelta: 0 },
+    { id: 'temp-hot', label: 'Hot', priceDelta: 0 },
+  ],
+};
+
+const sugarVariantGroup: VariantGroup = {
+  id: 'vg-sugar',
+  name: 'Tingkat Gula',
+  required: true,
+  options: [
+    { id: 'sugar-normal', label: 'Normal Sugar', priceDelta: 0 },
+    { id: 'sugar-less', label: 'Less Sugar (50%)', priceDelta: 0 },
+    { id: 'sugar-none', label: 'No Sugar', priceDelta: 0 },
+  ],
+};
+
+const iceVariantGroup: VariantGroup = {
+  id: 'vg-ice',
+  name: 'Takaran Es',
+  required: true,
+  options: [
+    { id: 'ice-normal', label: 'Normal Ice', priceDelta: 0 },
+    { id: 'ice-less', label: 'Less Ice', priceDelta: 0 },
+    { id: 'ice-none', label: 'No Ice', priceDelta: 0 },
+  ],
+};
+
+const coffeeToppings: ToppingOption[] = [
+  { id: 'top-shot', name: 'Extra Espresso Shot', price: 6000 },
+  { id: 'top-oat', name: 'Ganti Oat Milk', price: 7000 },
+  { id: 'top-caramel', name: 'Caramel Drizzle', price: 4000 },
+  { id: 'top-vanilla', name: 'Vanilla Syrup', price: 4000 },
+];
+
+const nonCoffeeToppings: ToppingOption[] = [
+  { id: 'top-oat', name: 'Ganti Oat Milk', price: 7000 },
+  { id: 'top-whip', name: 'Whipped Cream', price: 5000 },
+  { id: 'top-cheese', name: 'Cheese Foam', price: 6000 },
+];
+
+const pastryToppings: ToppingOption[] = [
+  { id: 'top-butter', name: 'Extra French Butter', price: 4000 },
+  { id: 'top-jam', name: 'Strawberry Jam', price: 4000 },
+  { id: 'top-choco-dip', name: 'Dark Chocolate Dip', price: 6000 },
+];
+
+export function createSeedData(): PosDataState {
+  const now = Date.now();
+  const origin =
+    typeof window !== 'undefined' && window.location.origin
+      ? window.location.origin
+      : 'http://localhost:3000';
+
+  const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+
+  return {
+    version: 1,
+    cafeSettings: {
+      name: 'LARIS Coffee',
+      slug: 'laris-coffee',
+      logoUrl: '',
+      description: 'Specialty coffee bar & artisan pastry dengan pemesanan cepat langsung dari meja Anda.',
+      address: 'Jl. Kemang Raya No. 48, Jakarta Selatan',
+      whatsapp: '0812-8890-4410',
+      operatingHours: '07:00 – 22:00 WIB',
+      isOpen: true,
+      qrBaseUrl: origin,
+      enableDineIn: true,
+      enableTakeaway: true,
+      enableTableService: true,
+      enablePickupCounter: true,
+    },
+    categories: [
+      { id: 'cat-coffee', name: 'Coffee', sortOrder: 1, isActive: true },
+      { id: 'cat-signature', name: 'Signature', sortOrder: 2, isActive: true },
+      { id: 'cat-non-coffee', name: 'Non Coffee', sortOrder: 3, isActive: true },
+      { id: 'cat-food', name: 'Food', sortOrder: 4, isActive: true },
+      { id: 'cat-snacks', name: 'Snacks', sortOrder: 5, isActive: true },
+    ],
+    products: [
+      {
+        id: 'prod-espresso',
+        categoryId: 'cat-coffee',
+        name: 'Espresso',
+        description: 'Ekstraksi double shot house blend Arabica dengan crema keemasan dan karakter dark chocolate.',
+        price: 18000,
+        image: PRODUCT_IMAGES.espresso,
+        isActive: true,
+        variantGroups: [
+          {
+            id: 'vg-shot',
+            name: 'Pilihan Shot',
+            required: true,
+            options: [
+              { id: 'shot-single', label: 'Single Shot', priceDelta: 0 },
+              { id: 'shot-double', label: 'Double Shot', priceDelta: 4000 },
+            ],
+          },
+        ],
+        toppings: [
+          { id: 'top-sparkling', name: 'Side Sparkling Water', price: 5000 },
+        ],
+      },
+      {
+        id: 'prod-americano',
+        categoryId: 'cat-coffee',
+        name: 'Americano',
+        description: 'Espresso house blend diseduh dengan air mineral pilihan, bersih, segar, dan beraroma kacang panggang.',
+        price: 20000,
+        image: PRODUCT_IMAGES.americano,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, tempVariantGroup, sugarVariantGroup, iceVariantGroup],
+        toppings: [
+          { id: 'top-shot', name: 'Extra Espresso Shot', price: 6000 },
+          { id: 'top-lemon', name: 'Fresh Lemon Slice', price: 3000 },
+        ],
+      },
+      {
+        id: 'prod-cafe-latte',
+        categoryId: 'cat-coffee',
+        name: 'Cafe Latte',
+        description: 'Perpaduan seimbang espresso lembut dan susu segar microfoam yang creamy untuk teman bekerja.',
+        price: 25000,
+        image: PRODUCT_IMAGES.cafeLatte,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, tempVariantGroup, sugarVariantGroup],
+        toppings: coffeeToppings,
+      },
+      {
+        id: 'prod-cappuccino',
+        categoryId: 'cat-coffee',
+        name: 'Cappuccino',
+        description: 'Espresso intens dengan rasio susu dan busa velvety tebal serta taburan tipis bubuk kakao.',
+        price: 25000,
+        image: PRODUCT_IMAGES.cappuccino,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, tempVariantGroup, sugarVariantGroup],
+        toppings: coffeeToppings,
+      },
+      {
+        id: 'prod-es-kopi-susu',
+        categoryId: 'cat-signature',
+        name: 'Es Kopi Susu',
+        description: 'Menu andalan LARIS: espresso bold, susu creamy, dan gula aren organik pilihan disajikan dingin.',
+        price: 22000,
+        image: PRODUCT_IMAGES.esKopiSusu,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, sugarVariantGroup, iceVariantGroup],
+        toppings: coffeeToppings,
+      },
+      {
+        id: 'prod-matcha-latte',
+        categoryId: 'cat-non-coffee',
+        name: 'Matcha Latte',
+        description: 'Uji ceremonial matcha Jepang dikocok halus bersama susu segar, menghadirkan rasa umami yang lembut.',
+        price: 28000,
+        image: PRODUCT_IMAGES.matchaLatte,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, tempVariantGroup, sugarVariantGroup, iceVariantGroup],
+        toppings: nonCoffeeToppings,
+      },
+      {
+        id: 'prod-chocolate',
+        categoryId: 'cat-non-coffee',
+        name: 'Chocolate',
+        description: 'Cokelat hitam Belgia pekat dipadukan dengan susu segar, kaya rasa tanpa terlalu manis.',
+        price: 24000,
+        image: PRODUCT_IMAGES.chocolate,
+        isActive: true,
+        variantGroups: [sizeVariantGroup, tempVariantGroup, sugarVariantGroup, iceVariantGroup],
+        toppings: nonCoffeeToppings,
+      },
+      {
+        id: 'prod-croissant',
+        categoryId: 'cat-snacks',
+        name: 'Croissant',
+        description: 'Butter croissant panggang setiap pagi dengan lapisan renyah keemasan dan aroma mentega Prancis.',
+        price: 20000,
+        image: PRODUCT_IMAGES.croissant,
+        isActive: true,
+        variantGroups: [
+          {
+            id: 'vg-warm',
+            name: 'Penyajian',
+            required: true,
+            options: [
+              { id: 'warm-yes', label: 'Hangatkan (Reheat)', priceDelta: 0 },
+              { id: 'warm-no', label: 'Suhu Ruang', priceDelta: 0 },
+            ],
+          },
+        ],
+        toppings: pastryToppings,
+      },
+    ],
+    tables: [
+      {
+        id: 'tbl-a01',
+        name: 'A01',
+        area: 'Indoor Window',
+        token: 'LRS-A01-8K4M2P',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+      {
+        id: 'tbl-a02',
+        name: 'A02',
+        area: 'Indoor Window',
+        token: 'LRS-A02-3N7V9R',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+      {
+        id: 'tbl-a03',
+        name: 'A03',
+        area: 'Indoor Main',
+        token: 'LRS-A03-5T2W6X',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+      {
+        id: 'tbl-b01',
+        name: 'B01',
+        area: 'Semi Outdoor',
+        token: 'LRS-B01-9H6C4Q',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+      {
+        id: 'tbl-b02',
+        name: 'B02',
+        area: 'Semi Outdoor',
+        token: 'LRS-B02-7D8F3Y',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+      {
+        id: 'tbl-b03',
+        name: 'B03',
+        area: 'Patio Garden',
+        token: 'LRS-B03-4J5M8Z',
+        isActive: true,
+        createdAt: ago(1440),
+        updatedAt: ago(1440),
+      },
+    ],
+    orders: [
+      {
+        id: 'ORD-2026-0004',
+        createdAt: ago(4),
+        updatedAt: ago(4),
+        customerName: 'Nadia Kusuma',
+        customerWhatsapp: '081345678901',
+        orderNote: 'Es kopinya tolong diaduk rata',
+        orderType: 'DINE_IN',
+        fulfillmentMethod: 'TABLE_SERVICE',
+        tableId: 'tbl-a01',
+        tableName: 'A01',
+        items: [
+          {
+            productId: 'prod-es-kopi-susu',
+            productName: 'Es Kopi Susu',
+            productImage: PRODUCT_IMAGES.esKopiSusu,
+            basePrice: 22000,
+            selectedVariants: [
+              { groupId: 'vg-size', groupName: 'Ukuran', optionId: 'size-lrg', optionLabel: 'Large (16 oz)', priceDelta: 5000 },
+              { groupId: 'vg-sugar', groupName: 'Tingkat Gula', optionId: 'sugar-less', optionLabel: 'Less Sugar (50%)', priceDelta: 0 },
+              { groupId: 'vg-ice', groupName: 'Takaran Es', optionId: 'ice-normal', optionLabel: 'Normal Ice', priceDelta: 0 },
+            ],
+            selectedToppings: [
+              { id: 'top-oat', name: 'Ganti Oat Milk', price: 7000 },
+            ],
+            quantity: 1,
+            notes: '',
+            unitPrice: 34000,
+            subtotal: 34000,
+          },
+          {
+            productId: 'prod-croissant',
+            productName: 'Croissant',
+            productImage: PRODUCT_IMAGES.croissant,
+            basePrice: 20000,
+            selectedVariants: [
+              { groupId: 'vg-warm', groupName: 'Penyajian', optionId: 'warm-yes', optionLabel: 'Hangatkan (Reheat)', priceDelta: 0 },
+            ],
+            selectedToppings: [],
+            quantity: 1,
+            notes: 'Potong dua',
+            unitPrice: 20000,
+            subtotal: 20000,
+          },
+        ],
+        totalAmount: 54000,
+        paymentMethod: 'QRIS',
+        paymentStatus: 'LUNAS',
+        orderStatus: 'ORDER_BARU',
+        cashierStatus: 'AKTIF',
+      },
+      {
+        id: 'ORD-2026-0003',
+        createdAt: ago(13),
+        updatedAt: ago(9),
+        customerName: 'Dimas Pratama',
+        customerWhatsapp: '081299881122',
+        orderType: 'DINE_IN',
+        fulfillmentMethod: 'TABLE_SERVICE',
+        tableId: 'tbl-a02',
+        tableName: 'A02',
+        items: [
+          {
+            productId: 'prod-cafe-latte',
+            productName: 'Cafe Latte',
+            productImage: PRODUCT_IMAGES.cafeLatte,
+            basePrice: 25000,
+            selectedVariants: [
+              { groupId: 'vg-size', groupName: 'Ukuran', optionId: 'size-reg', optionLabel: 'Regular (12 oz)', priceDelta: 0 },
+              { groupId: 'vg-temp', groupName: 'Penyajian', optionId: 'temp-hot', optionLabel: 'Hot', priceDelta: 0 },
+              { groupId: 'vg-sugar', groupName: 'Tingkat Gula', optionId: 'sugar-none', optionLabel: 'No Sugar', priceDelta: 0 },
+            ],
+            selectedToppings: [],
+            quantity: 2,
+            notes: '',
+            unitPrice: 25000,
+            subtotal: 50000,
+          },
+        ],
+        totalAmount: 50000,
+        paymentMethod: 'E_WALLET',
+        paymentSubMethod: 'GoPay',
+        paymentStatus: 'LUNAS',
+        orderStatus: 'MEMASAK',
+        cashierStatus: 'AKTIF',
+      },
+      {
+        id: 'ORD-2026-0002',
+        createdAt: ago(26),
+        updatedAt: ago(18),
+        customerName: 'Raka Wijaya',
+        orderType: 'TAKEAWAY',
+        fulfillmentMethod: 'PICKUP_COUNTER',
+        items: [
+          {
+            productId: 'prod-americano',
+            productName: 'Americano',
+            productImage: PRODUCT_IMAGES.americano,
+            basePrice: 20000,
+            selectedVariants: [
+              { groupId: 'vg-size', groupName: 'Ukuran', optionId: 'size-lrg', optionLabel: 'Large (16 oz)', priceDelta: 5000 },
+              { groupId: 'vg-temp', groupName: 'Penyajian', optionId: 'temp-iced', optionLabel: 'Iced', priceDelta: 0 },
+              { groupId: 'vg-sugar', groupName: 'Tingkat Gula', optionId: 'sugar-none', optionLabel: 'No Sugar', priceDelta: 0 },
+              { groupId: 'vg-ice', groupName: 'Takaran Es', optionId: 'ice-less', optionLabel: 'Less Ice', priceDelta: 0 },
+            ],
+            selectedToppings: [],
+            quantity: 1,
+            notes: 'Tanpa sedotan plastik',
+            unitPrice: 25000,
+            subtotal: 25000,
+          },
+        ],
+        totalAmount: 25000,
+        paymentMethod: 'CASHIER',
+        paymentStatus: 'BELUM_DIBAYAR',
+        orderStatus: 'MEMASAK',
+        cashierStatus: 'AKTIF',
+      },
+      {
+        id: 'ORD-2026-0001',
+        createdAt: ago(52),
+        updatedAt: ago(38),
+        customerName: 'Siti Rahma',
+        customerWhatsapp: '085611223344',
+        orderType: 'DINE_IN',
+        fulfillmentMethod: 'TABLE_SERVICE',
+        tableId: 'tbl-b01',
+        tableName: 'B01',
+        items: [
+          {
+            productId: 'prod-matcha-latte',
+            productName: 'Matcha Latte',
+            productImage: PRODUCT_IMAGES.matchaLatte,
+            basePrice: 28000,
+            selectedVariants: [
+              { groupId: 'vg-size', groupName: 'Ukuran', optionId: 'size-reg', optionLabel: 'Regular (12 oz)', priceDelta: 0 },
+              { groupId: 'vg-temp', groupName: 'Penyajian', optionId: 'temp-iced', optionLabel: 'Iced', priceDelta: 0 },
+              { groupId: 'vg-sugar', groupName: 'Tingkat Gula', optionId: 'sugar-less', optionLabel: 'Less Sugar (50%)', priceDelta: 0 },
+              { groupId: 'vg-ice', groupName: 'Takaran Es', optionId: 'ice-normal', optionLabel: 'Normal Ice', priceDelta: 0 },
+            ],
+            selectedToppings: [
+              { id: 'top-cheese', name: 'Cheese Foam', price: 6000 },
+            ],
+            quantity: 1,
+            notes: '',
+            unitPrice: 34000,
+            subtotal: 34000,
+          },
+          {
+            productId: 'prod-cappuccino',
+            productName: 'Cappuccino',
+            productImage: PRODUCT_IMAGES.cappuccino,
+            basePrice: 25000,
+            selectedVariants: [
+              { groupId: 'vg-size', groupName: 'Ukuran', optionId: 'size-reg', optionLabel: 'Regular (12 oz)', priceDelta: 0 },
+              { groupId: 'vg-temp', groupName: 'Penyajian', optionId: 'temp-hot', optionLabel: 'Hot', priceDelta: 0 },
+              { groupId: 'vg-sugar', groupName: 'Tingkat Gula', optionId: 'sugar-normal', optionLabel: 'Normal Sugar', priceDelta: 0 },
+            ],
+            selectedToppings: [],
+            quantity: 1,
+            notes: '',
+            unitPrice: 25000,
+            subtotal: 25000,
+          },
+        ],
+        totalAmount: 59000,
+        paymentMethod: 'BANK_TRANSFER',
+        paymentSubMethod: 'BCA Virtual Account',
+        paymentStatus: 'LUNAS',
+        orderStatus: 'DISAJIKAN',
+        cashierStatus: 'SELESAI',
+      },
+    ],
+    activities: [
+      {
+        id: 'act-4',
+        timestamp: ago(4),
+        message: 'Pesanan baru ORD-2026-0004 masuk dari Meja A01 (Nadia Kusuma)',
+        orderId: 'ORD-2026-0004',
+      },
+      {
+        id: 'act-3',
+        timestamp: ago(9),
+        message: 'ORD-2026-0003 mulai dimasak untuk Meja A02',
+        orderId: 'ORD-2026-0003',
+      },
+      {
+        id: 'act-2',
+        timestamp: ago(18),
+        message: 'ORD-2026-0002 (Takeaway) dikonfirmasi — Bayar di Kasir',
+        orderId: 'ORD-2026-0002',
+      },
+      {
+        id: 'act-1',
+        timestamp: ago(38),
+        message: 'ORD-2026-0001 telah disajikan ke Meja B01 — Transaksi Kasir Selesai',
+        orderId: 'ORD-2026-0001',
+      },
+    ],
+    lastOrderSequence: 4,
+  };
+}

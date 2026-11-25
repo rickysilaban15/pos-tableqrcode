@@ -1,0 +1,8 @@
+{
+  "name": "LARIS POS",
+  "description": "Prototipe sistem pemesanan coffee shop berbasis QR Code dengan Admin Dashboard, generator QR meja siap cetak, Customer Web Ordering mobile-first, simulasi pembayaran, dan Order Tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
