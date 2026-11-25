@@ -15,7 +15,6 @@ import type {
   Product,
 } from '../types/pos';
 import {
-  generateOrderId,
   generateTableToken,
   isLocalhostUrl,
   isPrivateAiStudioDevUrl,
@@ -38,6 +37,7 @@ export interface CreateOrderInput {
   fulfillmentMethod: FulfillmentMethod;
   tableId?: string;
   tableName?: string;
+  tableToken?: string;
   items: OrderItemSnapshot[];
   totalAmount: number;
   paymentMethod: PaymentMethod;
@@ -529,51 +529,16 @@ export const PosProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createOrder = useCallback(
     async (input: CreateOrderInput): Promise<Order> => {
-      try {
-        const created = await apiRequest<Order>('/api/pos/orders', {
-          method: 'POST',
-          body: JSON.stringify(input),
-        });
-        knownOrderIdsRef.current.add(created.id);
-        await refreshFromServer(false);
-        notifyLocalTabs();
-        return created;
-      } catch {
-        // Offline local fallback if server unreachable
-        const nowIso = new Date().toISOString();
-        const nextSeq = (state.lastOrderSequence || 0) + 1;
-        const fallbackOrder: Order = {
-          id: generateOrderId(nextSeq),
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          customerName: input.customerName.trim(),
-          customerWhatsapp: input.customerWhatsapp?.trim() || undefined,
-          orderNote: input.orderNote?.trim() || undefined,
-          orderType: input.orderType,
-          fulfillmentMethod: input.fulfillmentMethod,
-          tableId: input.orderType === 'DINE_IN' ? input.tableId : undefined,
-          tableName: input.orderType === 'DINE_IN' ? input.tableName : undefined,
-          items: input.items,
-          totalAmount: input.totalAmount,
-          paymentMethod: input.paymentMethod,
-          paymentSubMethod: input.paymentSubMethod,
-          paymentStatus: input.paymentStatus,
-          orderStatus: 'ORDER_BARU',
-          cashierStatus: 'AKTIF',
-        };
-        setState((prev) => {
-          const next = {
-            ...prev,
-            orders: [fallbackOrder, ...prev.orders],
-            lastOrderSequence: nextSeq,
-          };
-          saveCache(next);
-          return next;
-        });
-        return fallbackOrder;
-      }
+      const created = await apiRequest<Order>('/api/pos/orders', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      });
+      knownOrderIdsRef.current.add(created.id);
+      await refreshFromServer(false);
+      notifyLocalTabs();
+      return created;
     },
-    [notifyLocalTabs, refreshFromServer, state.lastOrderSequence],
+    [notifyLocalTabs, refreshFromServer],
   );
 
   const updateOrderStatus = useCallback(

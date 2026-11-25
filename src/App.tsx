@@ -12,6 +12,10 @@ import { AdminTablePrintPage } from './pages/admin/AdminTablePrintPage';
 import { AdminSettingsPage } from './pages/admin/AdminSettingsPage';
 import { CustomerOrderPage } from './pages/customer/CustomerOrderPage';
 import { OrderTrackingPage } from './pages/customer/OrderTrackingPage';
+import { PostgresTrackingPage } from './pages/customer/PostgresTrackingPage';
+import { PostgresMenuPage } from './pages/customer/PostgresMenuPage';
+import { PostgresMerchantPage } from './pages/admin/PostgresMerchantPage';
+import { MerchantLoginPage } from './pages/admin/MerchantLoginPage';
 
 export default function App() {
   return (
@@ -37,6 +41,10 @@ export default function App() {
           {/* Customer Web Ordering & Tracking Routes */}
           <Route path="/order/:storeSlug" element={<CustomerOrderPage />} />
           <Route path="/order-tracking/:orderId" element={<OrderTrackingPage />} />
+          <Route path="/tracking/:token" element={<PostgresTrackingPage />} />
+          <Route path="/q/:token" element={<PostgresMenuPage />} />
+          <Route path="/merchant/login" element={<MerchantLoginPage />} />
+          <Route path="/merchant" element={<PostgresMerchantPage />} />
 
           {/* Fallback */}
           <Route path="*" element={<Navigate to="/" replace />} />

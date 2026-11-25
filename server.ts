@@ -1,8 +1,18 @@
 import express from 'express';
+import cookieParser from 'cookie-parser';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
+import { authRouter } from './server/modules/auth/routes.ts';
+import { productsRouter } from './server/modules/products/routes.ts';
+import { customizationsRouter } from './server/modules/products/customizations.ts';
+import { categoriesRouter } from './server/modules/categories/routes.ts';
+import { publicTablesRouter, tablesRouter } from './server/modules/tables/routes.ts';
+import { merchantOrdersRouter, publicOrdersRouter } from './server/modules/orders/routes.ts';
+import { paymentsRouter } from './server/modules/payments/routes.ts';
+import { databaseHealth } from './server/database/client.ts';
 import { createSeedData } from './src/data/seedData.ts';
 import type {
   ActivityLog,
@@ -15,7 +25,6 @@ import type {
   OrderStatus,
   OrderType,
   PaymentMethod,
-  PaymentStatus,
   PosDataState,
   Product,
 } from './src/types/pos.ts';
@@ -37,11 +46,6 @@ const ALLOWED_PAYMENT_METHODS: ReadonlySet<PaymentMethod> = new Set([
   'BANK_TRANSFER',
   'CASHIER',
 ]);
-const ALLOWED_PAYMENT_STATUS: ReadonlySet<PaymentStatus> = new Set([
-  'BELUM_DIBAYAR',
-  'LUNAS',
-  'GAGAL',
-]);
 const ALLOWED_ORDER_STATUS: ReadonlySet<OrderStatus> = new Set([
   'ORDER_BARU',
   'MEMASAK',
@@ -50,12 +54,8 @@ const ALLOWED_ORDER_STATUS: ReadonlySet<OrderStatus> = new Set([
 
 function generateTableToken(tableName: string): string {
   const cleanName = tableName.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 6) || 'TBL';
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let rand = '';
-  for (let i = 0; i < 6; i += 1) {
-    rand += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return `LRS-${cleanName}-${rand}`;
+  // Cryptographically secure entropy prevents practical QR-token guessing.
+  return `LRS-${cleanName}-${randomBytes(12).toString('base64url')}`;
 }
 
 function generateOrderId(sequence: number): string {
@@ -256,11 +256,52 @@ function updateAndBroadcast(nextState: PosDataState, reason: string, orderId?: s
 async function startServer() {
   const app = express();
   app.set('trust proxy', true);
+  app.use(cookieParser());
   app.use(express.json({ limit: '2mb' }));
 
+  // Lightweight per-process protection for the public ordering surface. A shared
+  // distributed limiter belongs in the production deployment (see ARCHITECTURE.md).
+  const requestWindows = new Map<string, { count: number; startedAt: number }>();
+  app.use('/api', (req, res, next) => {
+    const key = req.ip || 'unknown';
+    const now = Date.now();
+    const windowMs = 60_000;
+    const entry = requestWindows.get(key);
+    const current = !entry || now - entry.startedAt >= windowMs
+      ? { count: 0, startedAt: now }
+      : entry;
+    current.count += 1;
+    requestWindows.set(key, current);
+    if (current.count > 120) {
+      res.status(429).json({ error: 'Terlalu banyak permintaan. Coba lagi sebentar.' });
+      return;
+    }
+    next();
+  });
+
   // Health endpoint
-  app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, ordersCount: posState.orders.length });
+  app.get('/api/health', async (_req, res) => {
+    const database = await databaseHealth().catch(() => false);
+    res.status(database || !process.env.DATABASE_URL ? 200 : 503).json({ ok: database || !process.env.DATABASE_URL, database, ordersCount: posState.orders.length });
+  });
+
+  app.use('/api/auth', authRouter);
+  app.use('/api/v1/products', productsRouter);
+  app.use('/api/v1/products', customizationsRouter);
+  app.use('/api/v1/categories', categoriesRouter);
+  app.use('/api/v1/tables', tablesRouter);
+  app.use('/api/public', publicTablesRouter);
+  app.use('/api/public', publicOrdersRouter);
+  app.use('/api/v1/orders', merchantOrdersRouter);
+  app.use('/api/v1/payments', paymentsRouter);
+  // Never expose stack traces or environment details through API responses.
+  app.use('/api/auth', (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('Authentication request failed:', error);
+    res.status(500).json({ error: 'Layanan autentikasi belum tersedia. Periksa konfigurasi server.' });
+  });
+  app.use('/api/v1', (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('Protected API request failed:', error);
+    res.status(500).json({ error: 'Layanan data belum tersedia. Periksa konfigurasi server.' });
   });
 
   // Get full authoritative POS state
@@ -675,7 +716,6 @@ async function startServer() {
     const orderType = body?.orderType as OrderType;
     const fulfillmentMethod = body?.fulfillmentMethod as FulfillmentMethod;
     const paymentMethod = body?.paymentMethod as PaymentMethod;
-    const paymentStatus = body?.paymentStatus as PaymentStatus;
     const rawItems = Array.isArray(body?.items) ? (body.items as OrderItemSnapshot[]) : [];
 
     if (!customerName) {
@@ -694,53 +734,76 @@ async function startServer() {
       res.status(400).json({ error: 'Metode pembayaran tidak valid' });
       return;
     }
-    if (!ALLOWED_PAYMENT_STATUS.has(paymentStatus)) {
-      res.status(400).json({ error: 'Status pembayaran tidak valid' });
-      return;
-    }
     if (rawItems.length === 0) {
       res.status(400).json({ error: 'Pesanan harus memiliki minimal 1 produk' });
       return;
     }
 
-    // Recompute Nett subtotals safely on server
-    const cleanItems: OrderItemSnapshot[] = rawItems.slice(0, 50).map((it) => {
+    // Prices, variants, and toppings are derived from the server-side catalog.
+    // Client-supplied price fields are intentionally ignored.
+    const cleanItems: OrderItemSnapshot[] = [];
+    for (const it of rawItems.slice(0, 50)) {
+      const productId = sanitizeString(it.productId, 60);
+      const product = posState.products.find((candidate) => candidate.id === productId && candidate.isActive);
+      if (!product) {
+        res.status(400).json({ error: 'Satu atau lebih produk tidak tersedia' });
+        return;
+      }
       const qty = Math.max(1, Math.min(99, Math.round(Number(it.quantity) || 1)));
-      const basePrice = Math.max(0, Math.round(Number(it.basePrice) || 0));
-      const selectedVariants = Array.isArray(it.selectedVariants)
-        ? it.selectedVariants.map((v) => ({
-            groupId: sanitizeString(v.groupId, 60),
-            groupName: sanitizeString(v.groupName, 60),
-            optionId: sanitizeString(v.optionId, 60),
-            optionLabel: sanitizeString(v.optionLabel, 80),
-            priceDelta: Math.max(0, Math.round(Number(v.priceDelta) || 0)),
-          }))
-        : [];
-      const selectedToppings = Array.isArray(it.selectedToppings)
-        ? it.selectedToppings.map((t) => ({
-            id: sanitizeString(t.id, 60),
-            name: sanitizeString(t.name, 80),
-            price: Math.max(0, Math.round(Number(t.price) || 0)),
-          }))
-        : [];
+      const selectedVariantIds = new Map<string, string>();
+      for (const variant of Array.isArray(it.selectedVariants) ? it.selectedVariants : []) {
+        selectedVariantIds.set(sanitizeString(variant.groupId, 60), sanitizeString(variant.optionId, 60));
+      }
+      const selectedVariants = [] as OrderItemSnapshot['selectedVariants'];
+      for (const group of product.variantGroups) {
+        const selectedId = selectedVariantIds.get(group.id);
+        if (group.required && !selectedId) {
+          res.status(400).json({ error: `Pilihan ${group.name} wajib diisi untuk ${product.name}` });
+          return;
+        }
+        if (selectedId) {
+          const option = group.options.find((candidate) => candidate.id === selectedId);
+          if (!option) {
+            res.status(400).json({ error: `Pilihan produk tidak valid untuk ${product.name}` });
+            return;
+          }
+          selectedVariants.push({ groupId: group.id, groupName: group.name, optionId: option.id, optionLabel: option.label, priceDelta: option.priceDelta });
+        }
+      }
+      const requestedToppingIds = new Set(
+        (Array.isArray(it.selectedToppings) ? it.selectedToppings : []).map((t) => sanitizeString(t.id, 60)),
+      );
+      const selectedToppings = product.toppings
+        .filter((topping) => requestedToppingIds.has(topping.id))
+        .map((topping) => ({ id: topping.id, name: topping.name, price: topping.price }));
       const unitPrice =
-        basePrice +
+        product.price +
         selectedVariants.reduce((s, v) => s + v.priceDelta, 0) +
         selectedToppings.reduce((s, t) => s + t.price, 0);
 
-      return {
-        productId: sanitizeString(it.productId, 60),
-        productName: sanitizeString(it.productName, 100) || 'Produk',
-        productImage: sanitizeSafeUrl(it.productImage),
-        basePrice,
+      cleanItems.push({
+        productId: product.id,
+        productName: product.name,
+        productImage: product.image,
+        basePrice: product.price,
         selectedVariants,
         selectedToppings,
         quantity: qty,
         notes: sanitizeString(it.notes, 200),
         unitPrice,
         subtotal: unitPrice * qty,
-      };
-    });
+      });
+    }
+
+    const requestedTableId = sanitizeString(body?.tableId, 60);
+    const requestedTableToken = sanitizeString(body?.tableToken, 120);
+    const table = orderType === 'DINE_IN'
+      ? posState.tables.find((candidate) => candidate.id === requestedTableId && candidate.isActive)
+      : undefined;
+    if (orderType === 'DINE_IN' && (!table || !requestedTableToken || table.token !== requestedTableToken)) {
+      res.status(400).json({ error: 'QR meja tidak valid atau sudah diperbarui' });
+      return;
+    }
 
     const totalAmount = cleanItems.reduce((sum, it) => sum + it.subtotal, 0);
     const nextSeq = (posState.lastOrderSequence || 0) + 1;
@@ -756,16 +819,15 @@ async function startServer() {
       orderNote: sanitizeString(body?.orderNote, 240) || undefined,
       orderType,
       fulfillmentMethod: orderType === 'TAKEAWAY' ? 'PICKUP_COUNTER' : fulfillmentMethod,
-      tableId: orderType === 'DINE_IN' ? sanitizeString(body?.tableId, 60) || undefined : undefined,
-      tableName:
-        orderType === 'DINE_IN'
-          ? sanitizeString(body?.tableName, 30).toUpperCase() || undefined
-          : undefined,
+      tableId: table?.id,
+      tableName: table?.name,
       items: cleanItems,
       totalAmount,
       paymentMethod,
       paymentSubMethod: sanitizeString(body?.paymentSubMethod, 60) || undefined,
-      paymentStatus,
+      // A payment provider or an authenticated cashier is the only authority
+      // allowed to transition this value to LUNAS.
+      paymentStatus: 'BELUM_DIBAYAR',
       orderStatus: 'ORDER_BARU',
       cashierStatus: 'AKTIF',
     };
@@ -866,6 +928,10 @@ async function startServer() {
 
   // Reset Demo Data
   app.post('/api/pos/reset', (req, res) => {
+    if (process.env.NODE_ENV === 'production' || process.env.ENABLE_DEMO_RESET !== 'true') {
+      res.status(404).json({ error: 'Endpoint demo tidak tersedia' });
+      return;
+    }
     const requestOrigin = extractSafeRequestOrigin(req);
     const fresh = ensureInitialQrBaseUrl(createSeedData());
     if (requestOrigin && !isPrivateOrLocalUrl(requestOrigin)) {

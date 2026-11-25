@@ -37,7 +37,7 @@ interface CartCheckoutDrawerProps {
   open: boolean;
   initialStep?: 'cart' | 'checkout';
   cart: CartItem[];
-  scannedTable: { id?: string; name: string } | null;
+  scannedTable: { id?: string; name: string; token?: string } | null;
   forceTakeawayMode: boolean;
   onClose: () => void;
   onUpdateQty: (cartItemId: string, delta: number) => void;
@@ -162,7 +162,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
         ? scannedTable
         : (() => {
             const found = activeTables.find((t) => t.id === manualTableId);
-            return found ? { id: found.id, name: found.name } : null;
+            return found ? { id: found.id, name: found.name, token: found.token } : null;
           })()
       : null;
 
@@ -201,6 +201,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
           fulfillmentMethod: orderType === 'TAKEAWAY' ? 'PICKUP_COUNTER' : fulfillmentMethod,
           tableId: resolvedTable?.id,
           tableName: resolvedTable?.name,
+          tableToken: resolvedTable?.token,
           items: cart.map(({ cartItemId: _ignore, ...snapshot }) => snapshot),
           totalAmount,
           paymentMethod: 'CASHIER',
@@ -208,6 +209,8 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
         });
         pushToast(`Pesanan ${created.id} terkirim ke dapur (Bayar di Kasir)`, 'success');
         onOrderCreated(created);
+      } catch (err) {
+        setFormError(err instanceof Error ? err.message : 'Pesanan belum dapat dikirim. Coba lagi.');
       } finally {
         setIsSubmitting(false);
       }
@@ -217,7 +220,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
     setStep('payment');
   };
 
-  const handleSimulatePaymentSuccess = async () => {
+  const handleConfirmPaymentInstruction = async () => {
     if (isSubmitting) return;
     setIsSubmitting(true);
     try {
@@ -229,14 +232,17 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
         fulfillmentMethod: orderType === 'TAKEAWAY' ? 'PICKUP_COUNTER' : fulfillmentMethod,
         tableId: resolvedTable?.id,
         tableName: resolvedTable?.name,
+        tableToken: resolvedTable?.token,
         items: cart.map(({ cartItemId: _ignore, ...snapshot }) => snapshot),
         totalAmount,
         paymentMethod,
         paymentSubMethod,
-        paymentStatus: 'LUNAS',
+        paymentStatus: 'BELUM_DIBAYAR',
       });
-      pushToast(`Pembayaran berhasil! Pesanan ${created.id} terkirim ke dapur`, 'success');
+      pushToast(`Pesanan ${created.id} dibuat. Selesaikan pembayaran sesuai instruksi.`, 'success');
       onOrderCreated(created);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Pesanan belum dapat dikirim. Coba lagi.');
     } finally {
       setIsSubmitting(false);
     }
@@ -756,7 +762,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                     />
                   </div>
                   <p className="mt-3 text-center text-xs text-[#64625C] leading-relaxed">
-                    Ini adalah simulasi pembayaran demo. Tekan tombol di bawah untuk menguji alur pembayaran berhasil atau gagal.
+                    Kode ini hanya simulasi. Pesanan akan dibuat dengan status menunggu pembayaran sampai pembayaran terverifikasi.
                   </p>
                 </div>
               )}
@@ -765,10 +771,10 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                 <div className="rounded-2xl border border-[#E8E6DF] bg-white p-5 space-y-2 text-center">
                   <Wallet className="h-8 w-8 text-[#1B4D3E] mx-auto" />
                   <h3 className="text-sm font-bold text-[#252525]">
-                    Konfirmasi E-Wallet ({ewalletProvider})
+                    Instruksi E-Wallet ({ewalletProvider})
                   </h3>
                   <p className="text-xs text-[#64625C] leading-relaxed">
-                    Permintaan pembayaran simulasi sebesar{' '}
+                    Selesaikan pembayaran sebesar{' '}
                     <strong className="font-mono text-[#252525]">{formatRupiah(totalAmount)}</strong>{' '}
                     atas nama <strong className="text-[#252525]">{customerName}</strong> siap diproses.
                   </p>
@@ -792,7 +798,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                     </button>
                   </div>
                   <p className="text-xs text-[#64625C]">
-                    Nomor Virtual Account bersifat simulasi demo. Pesanan baru akan dikirim ke dapur setelah pembayaran berhasil disimulasikan.
+                    Nomor Virtual Account bersifat simulasi demo. Pesanan dibuat sebagai menunggu pembayaran; status lunas hanya dapat dikonfirmasi sistem pembayaran atau kasir.
                   </p>
                 </div>
               )}
@@ -802,7 +808,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
               <button
                 type="button"
                 disabled={isSubmitting}
-                onClick={handleSimulatePaymentSuccess}
+                onClick={handleConfirmPaymentInstruction}
                 className="w-full min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#1B4D3E] px-5 py-3 text-sm font-bold text-white hover:bg-[#143B2F] disabled:opacity-60 transition-colors"
               >
                 {isSubmitting ? (
@@ -811,7 +817,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                   <CheckCircle2 className="h-4 w-4 text-[#FCD804]" />
                 )}
                 <span>
-                  {isSubmitting ? 'Memproses Pesanan...' : 'Simulasikan Pembayaran Berhasil'}
+                  {isSubmitting ? 'Membuat Pesanan...' : 'Buat Pesanan'}
                 </span>
               </button>
               <button
@@ -821,7 +827,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                 className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-2.5 text-xs font-bold text-[#A62626] hover:bg-[#FADADA] disabled:opacity-60 transition-colors"
               >
                 <XCircle className="h-4 w-4" />
-                <span>Simulasikan Pembayaran Gagal</span>
+                <span>Batalkan Simulasi Pembayaran</span>
               </button>
             </div>
           </div>
