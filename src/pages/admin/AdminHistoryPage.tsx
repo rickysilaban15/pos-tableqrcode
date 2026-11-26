@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Banknote, QrCode, ReceiptText, RefreshCw, Search, Store } from 'lucide-react';
+import { Banknote, QrCode, ReceiptText, RefreshCw, Search, Store, Download } from 'lucide-react';
 import { formatDateTime, formatRupiah } from '../../utils/format';
 import { ReceiptModal, type ReceiptData } from '../../components/ReceiptModal';
 
@@ -143,6 +143,59 @@ export const AdminHistoryPage: React.FC = () => {
   const totalRevenueSafe = summary.paidRevenue || 1;
   const qrShare = Math.round((summary.qrRevenue / totalRevenueSafe) * 100);
   const posShare = summary.paidRevenue > 0 ? 100 - qrShare : 0;
+
+  const exportCsv = () => {
+    const rows = tab === 'orders' ? orders : payments;
+    if (rows.length === 0) return;
+
+    let csv: string;
+    if (tab === 'orders') {
+      const header = ['ID Pesanan', 'Waktu', 'Pelanggan', 'Jenis', 'Sumber', 'Meja', 'Status', 'Status Bayar', 'Metode', 'Total (Rp)', 'Tunai Diterima (Rp)', 'Kembalian (Rp)', 'Lunas Pada'];
+      const dataRows = (orders as HistoryOrder[]).map((o) => [
+        o.id,
+        o.createdAt,
+        o.customerName,
+        o.orderType === 'DINE_IN' ? 'Dine In' : 'Takeaway',
+        o.orderSource,
+        o.tableName ?? '',
+        statusLabel[o.orderStatus] ?? o.orderStatus,
+        paymentStatusLabel[o.paymentStatus] ?? o.paymentStatus,
+        o.method,
+        o.totalAmount,
+        o.cashReceived ?? '',
+        o.changeAmount ?? '',
+        o.paidAt ?? '',
+      ].map((v) => `"${String(v).replace(/"/g, '""')}"`));
+      csv = [header.map((h) => `"${h}"`), ...dataRows].map((r) => r.join(',')).join('\n');
+    } else {
+      const header = ['ID Pembayaran', 'ID Pesanan', 'Waktu', 'Pelanggan', 'Sumber', 'Status Pesanan', 'Metode', 'Status', 'Jumlah (Rp)', 'Tunai (Rp)', 'Kembalian (Rp)', 'Lunas Pada', 'Diverifikasi Oleh'];
+      const dataRows = (payments as PaymentRow[]).map((p) => [
+        p.id,
+        p.orderId,
+        p.createdAt,
+        p.customerName,
+        p.orderSource,
+        p.orderStatus,
+        p.method,
+        p.status,
+        p.amount,
+        p.cashReceived ?? '',
+        p.changeAmount ?? '',
+        p.paidAt ?? '',
+        p.verifiedByName ?? '',
+      ].map((v) => `"${String(v).replace(/"/g, '""')}"`));
+      csv = [header.map((h) => `"${h}"`), ...dataRows].map((r) => r.join(',')).join('\n');
+    }
+
+    const bom = '\uFEFF'; // UTF-8 BOM for Excel compatibility
+    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transaksi-${tab}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="space-y-6">
@@ -293,6 +346,16 @@ export const AdminHistoryPage: React.FC = () => {
             >
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
               <span>Segarkan</span>
+            </button>
+            <button
+              type="button"
+              onClick={exportCsv}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-[#E8E6DF] bg-white px-3 py-2 text-xs font-semibold text-[#1B4D3E] hover:bg-[#EEF4F1]"
+              title="Ekspor data ke CSV"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Ekspor CSV</span>
             </button>
           </div>
         </div>

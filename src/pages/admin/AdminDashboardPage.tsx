@@ -329,6 +329,34 @@ export const AdminDashboardPage: React.FC = () => {
               </div>
             </div>
           </section>
+
+          {/* Quick Setup Checklist — shown when no orders yet */}
+          {metrics.totalOrders === 0 && (
+            <section className="rounded-2xl border border-[#FCD804]/40 bg-[#FFFDE7] p-5 sm:p-6">
+              <h3 className="text-sm font-bold text-[#252525] mb-3">🚀 Mulai dalam 4 langkah</h3>
+              <ul className="space-y-2.5">
+                {[
+                  { to: '/admin/settings', text: 'Lengkapi profil & upload logo outlet', done: false },
+                  { to: '/admin/categories', text: 'Buat kategori menu (Kopi, Makanan, dll.)', done: false },
+                  { to: '/admin/menu', text: 'Tambah produk dan harga', done: false },
+                  { to: '/admin/tables', text: 'Tambah meja dan cetak QR Code', done: state.tables.length > 0 },
+                ].map((item, idx) => (
+                  <li key={idx}>
+                    <Link
+                      to={item.to}
+                      className={`flex items-center gap-2.5 text-xs font-semibold transition-colors ${item.done ? 'text-[#15623A]' : 'text-[#1B4D3E] hover:underline'}`}
+                    >
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${item.done ? 'bg-[#1B4D3E] text-white' : 'bg-white border border-[#1B4D3E]/40 text-[#1B4D3E]'}`}>
+                        {item.done ? '✓' : idx + 1}
+                      </span>
+                      {item.text}
+                      {!item.done && <ArrowRight className="h-3 w-3 ml-auto" />}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
       </div>
     </div>
