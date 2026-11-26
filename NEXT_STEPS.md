@@ -1,83 +1,74 @@
-# Implementation Checkpoint — Session Update
+# Implementation Checkpoint — Post-Session
+
+## Verification Results (Latest)
+- PostgreSQL Docker: ✅ healthy on port 5433
+- npm run lint (tsc --noEmit): ✅ Exit 0
+- npm run build: ✅ Exit 0 (no warnings)
+- npm run test:e2e: ✅ 8 passed, 10 intentional skips
 
 ## Completed This Session
 
-### Milestone A — Super Admin Frontend
-- ✅ Super Admin login page (`/super-admin/login`) with SUPER_ADMIN role verification
-- ✅ Super Admin layout with dark-theme sidebar (`/super-admin/*`)
-- ✅ Super Admin overview dashboard — real KPI metrics, GMV, recent merchants, audit log
-- ✅ Super Admin merchants page — search, status filter, full merchant table, detail panel
-- ✅ Subscription management UI — status, plan assignment, day extension, feature toggles (QR/POS)
-- ✅ Super Admin plans page — plan cards with inline edit (price, days, active status)
-- ✅ Super Admin audit log page — searchable, expandable payload viewer
-- ✅ All wired to existing `/api/super-admin/overview`, `PATCH /merchants/:id/subscription`, `PATCH /plans/:id`
-- ✅ Merchant subscription page at `/admin/subscription` — entitlement info, feature status
-- ✅ AdminLayout updated with Langganan nav item + CreditCard icon
+### Milestone A — Super Admin ✅
+- Super Admin login page at `/super-admin/login` with SUPER_ADMIN role verification
+- Super Admin layout with dark-theme sidebar — Overview, Merchants, Plans, Audit
+- Overview dashboard: real KPIs (totalMerchants, MRR, GMV, activeSubscriptions), merchant list, audit log
+- Merchants page: search/filter, table view, detail panel, subscription editor (status, plan, days, feature toggles)
+- Plans page: plan cards with inline price/days/active editing
+- Audit log page: searchable, expandable JSON payload viewer
+- Merchant subscription page at `/admin/subscription` within AdminLayout
+- `npm run db:create-super-admin` script for secure super admin provisioning
 
-### Milestone B — Public SaaS Landing Page
-- ✅ Premium landing page at `/` — hero, features, how-it-works, pricing, FAQ, CTA footer
-- ✅ Inline merchant registration modal — calls `/api/auth/register`, logs in automatically
-- ✅ DemoPortalPage preserved at `/demo`
-- ✅ MerchantLoginPage improved — polished design, eye-toggle, role-based redirect (admin vs super-admin)
+### Milestone B — Public SaaS Landing Page ✅
+- Premium landing page at `/` with hero, features, how-it-works, pricing, FAQ, CTA footer
+- Inline merchant registration modal → `/api/auth/register` → auto-login → `/admin`
+- DemoPortalPage preserved and accessible at `/demo`
+- Polished MerchantLoginPage with eye-toggle, role-based redirect (MERCHANT_OWNER → /admin, SUPER_ADMIN → /super-admin)
+- Updated index.html metadata (WarkopOS branding)
 
-### Milestone F — Performance
-- ✅ Route-level lazy loading with React.lazy + Suspense for all pages
-- ✅ Vite manual chunks: vendor-react, vendor-react-dom, vendor-router, vendor-lucide
-- ✅ Main bundle reduced from 910KB to 56KB (page chunks 10–73KB each)
-- ✅ Large-chunk warning eliminated
+### Milestone F — Performance ✅
+- Route-level lazy loading with React.lazy + Suspense for all pages
+- Vite manualChunks function: vendor-react-dom, vendor-router, vendor-lucide
+- Main bundle: 910KB → 56KB (page chunks 10–73KB each)
+- Large-chunk warning eliminated
 
-### Milestone G — Testing
-- ✅ All existing 6 E2E tests continue to pass (6 intentional skips unchanged)
-- ✅ New super-admin.spec.ts: 2 new tests (access control + landing page)
-- ✅ Total: 8 passed, 10 skipped (skips are project-variant deduplication)
-- ✅ lint (tsc --noEmit): passes
-- ✅ production build: passes
-
-### Steering
-- ✅ `.kiro/steering/project-rules.md` created with full product/architecture rules
-
-## Verification Results
-- PostgreSQL Docker: healthy on port 5433
-- npm run lint: ✅ Exit 0
-- npm run build: ✅ Exit 0 (no chunk warnings)
-- npm run test:e2e: ✅ 8 passed, 10 skipped
+### Milestone G — Testing ✅
+- 8 E2E tests pass (up from 6), 10 intentional skips
+- New super-admin.spec.ts: full super admin flow including actual login, overview API, merchant listing, subscription PATCH, audit log
+- global-setup.ts seeds SUPER_ADMIN user for E2E tests
+- .kiro/steering/project-rules.md created with full product/architecture rules
 
 ## Remaining Tasks (Priority Order)
 
-### Milestone A (remaining)
-1. Super Admin user seed in database — currently no SUPER_ADMIN user exists in production DB
-   → Need a migration or seeding script to create the initial super admin account securely
-   → Or: add a super admin creation endpoint (protected by a one-time token / env setup)
+### Critical — Needs Before Production
+1. **Super Admin provisioning in production**: Run `SUPER_ADMIN_EMAIL=... SUPER_ADMIN_PASSWORD=... npm run db:create-super-admin` once after deployment
+2. **Subscription billing integration**: Currently manual. No external payment gateway for SaaS billing. Document this honestly.
 
-### Milestone C — Operational Integration Gaps
-2. Review customer order tracking SSE events for reliability
-3. Add receipt download/print for customers from tracking page
-4. Verify thermal print layout works for merchant receipts
-5. Transaction source reporting (QR vs POS) already in history — verify completeness
+### Milestone C — Operational Gaps (Medium Priority)
+3. Customer receipt download button on tracking page (currently only merchant has receipt)
+4. Thermal print CSS finalization (58mm/80mm modes in ReceiptModal)
+5. Transaction history export (CSV/PDF) for merchants
+6. Advanced order search/filter in AdminHistoryPage
 
-### Milestone D — Security & Architecture
-6. Cross-tenant SSE verification (tenant-scoped events bus)
-7. Verify concurrent checkout idempotency under load
-8. Audit expired order cleanup behavior
+### Milestone D — Security & Architecture (Medium Priority)
+7. Cross-tenant SSE isolation test coverage (SSE bus already tenant-scoped, needs E2E proof)
+8. Concurrent checkout idempotency stress test
+9. Expired order cleanup verification test
+10. Session token rotation on login (currently 7-day fixed expiry)
 
-### Milestone E — Premium UI/UX
-9. Customer QR ordering — improve product cards, cart animations, checkout modal
-10. Merchant dashboard — improve charts, real-time order arrival indicators
-11. Manual POS — touchscreen optimization, payment flow polish
-12. Add prefers-reduced-motion support to animations
+### Milestone E — Premium UI/UX (Ongoing)
+11. Customer QR ordering product card micro-animations
+12. Merchant dashboard real-time order arrival animation (badge pulse)
+13. Manual POS touchscreen target size improvements
+14. prefers-reduced-motion CSS media query support
+15. Skeleton loading states for all data-loading pages
 
-### Milestone G (remaining tests)
-13. E2E test for merchant registration flow (via landing page modal)
-14. E2E test for super admin login with actual super_admin user
-15. E2E test for subscription entitlement enforcement
-16. E2E test for SSE tenant isolation
-
-## Known Blockers
-- No SUPER_ADMIN user in production DB: need secure seeding mechanism before super admin can be used
-  → Workaround: use `npm run db:seed` or a manual INSERT with `is_super_admin = true`
-  → The login route already supports `is_super_admin` column
+### Milestone G — Additional Test Coverage
+16. E2E test: merchant registration flow via landing page modal
+17. E2E test: subscription entitlement enforcement (expired → cannot create new orders)
+18. E2E test: SSE event delivery to multiple subscribers
+19. E2E test: legacy QR redirect flow
 
 ## Exact Next Action
-1. Create a database seed/script to provision a super admin account
-2. Continue Milestone C — customer tracking UX improvements
-3. Continue Milestone E — customer QR ordering UI polish
+1. Add customer receipt view/download to OrderTrackingPage (via `/api/public/tracking/:token` receipt endpoint)
+2. Add E2E test for subscription entitlement enforcement
+3. Continue Milestone E — customer ordering page micro-interaction improvements
