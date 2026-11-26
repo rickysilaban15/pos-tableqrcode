@@ -47,7 +47,7 @@ const addon = (await client.query("INSERT INTO product_addons(product_id,name,pr
 const table = (await client.query('INSERT INTO dining_tables(merchant_id,outlet_id,name) VALUES($1,$2,$3) RETURNING id',[a.store.id,a.outlet.id,'E2E-01'])).rows[0];
 const qrToken = crypto.randomBytes(32).toString('base64url');
 const qrHash = crypto.createHash('sha256').update(qrToken).digest('hex');
-await client.query('INSERT INTO table_qr_codes(table_id,token_hash) VALUES($1,$2)',[table.id,qrHash]);
+await client.query('INSERT INTO table_qr_codes(table_id,token_hash,public_token) VALUES($1,$2,$3)',[table.id,qrHash,qrToken]);
 await fs.writeFile('.e2e-state.json', JSON.stringify({ password, superAdmin: { email: superAdminEmail }, merchantA: { email:a.user.email, merchantId:a.store.id, outletId:a.outlet.id, productId:product.id, variantId:variant.id, addonId:addon.id, qrToken }, merchantB:{email:b.user.email,merchantId:b.store.id,outletId:b.outlet.id} }));
 await client.end();
 }
