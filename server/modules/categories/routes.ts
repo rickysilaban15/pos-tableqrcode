@@ -1,12 +1,80 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../../database/client.ts';
-import { allowRoles, requireAuth } from '../../middleware/auth.ts';
+import { allowRoles, isUuid, requireAuth, requireMerchantContext } from '../../middleware/auth.ts';
 
-const input = z.object({ name: z.string().trim().min(1).max(60), sortOrder: z.number().int().min(0).optional(), isActive: z.boolean().optional() });
+const input = z.object({
+  name: z.string().trim().min(1).max(60),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+  isActive: z.boolean().optional(),
+});
+
 export const categoriesRouter = Router();
-categoriesRouter.use(requireAuth);
-categoriesRouter.get('/', async (req,res,next)=>{try{if(!pool)throw new Error('Database tidak tersedia');const r=await pool.query('SELECT id,name,sort_order "sortOrder",is_active "isActive" FROM categories WHERE merchant_id=$1 AND outlet_id=$2 ORDER BY sort_order,name',[req.auth!.merchantId,req.auth!.outletId]);res.json(r.rows);}catch(e){next(e);}});
-categoriesRouter.post('/',allowRoles('MERCHANT_OWNER'),async(req,res,next)=>{try{if(!pool)throw new Error('Database tidak tersedia');const v=input.parse(req.body);const r=await pool.query('INSERT INTO categories(merchant_id,outlet_id,name,sort_order,is_active) VALUES($1,$2,$3,$4,$5) RETURNING id,name,sort_order "sortOrder",is_active "isActive"',[req.auth!.merchantId,req.auth!.outletId,v.name,v.sortOrder??0,v.isActive??true]);res.status(201).json(r.rows[0]);}catch(e){next(e);}});
-categoriesRouter.patch('/:id',allowRoles('MERCHANT_OWNER'),async(req,res,next)=>{try{if(!pool)throw new Error('Database tidak tersedia');const v=input.partial().parse(req.body);const fields:string[]=[];const vals:unknown[]=[];const keys:{[key:string]:string}={name:'name',sortOrder:'sort_order',isActive:'is_active'};for(const [k,x]of Object.entries(v)){fields.push(`${keys[k]}=$${vals.length+1}`);vals.push(x);}if(!fields.length)return res.status(400).json({error:'Tidak ada perubahan'});vals.push(req.params.id,req.auth!.merchantId,req.auth!.outletId);const r=await pool.query(`UPDATE categories SET ${fields.join(',')},updated_at=now() WHERE id=$${vals.length-2} AND merchant_id=$${vals.length-1} AND outlet_id=$${vals.length} RETURNING id,name,sort_order "sortOrder",is_active "isActive"`,vals);if(!r.rowCount)return res.status(404).json({error:'Kategori tidak ditemukan'});res.json(r.rows[0]);}catch(e){next(e);}});
-categoriesRouter.delete('/:id',allowRoles('MERCHANT_OWNER'),async(req,res,next)=>{try{if(!pool)throw new Error('Database tidak tersedia');const r=await pool.query('UPDATE categories SET is_active=false,updated_at=now() WHERE id=$1 AND merchant_id=$2 AND outlet_id=$3 RETURNING id',[req.params.id,req.auth!.merchantId,req.auth!.outletId]);if(!r.rowCount)return res.status(404).json({error:'Kategori tidak ditemukan'});res.status(204).end();}catch(e){next(e);}});
+categoriesRouter.use(requireAuth, requireMerchantContext);
+
+categoriesRouter.get('/', async (req, res, next) => {
+  try {
+    if (!pool) throw new Error('Database tidak tersedia');
+    const r = await pool.query(
+      'SELECT id,name,sort_order "sortOrder",is_active "isActive" FROM categories WHERE merchant_id=$1 AND outlet_id=$2 ORDER BY sort_order,name',
+      [req.auth!.merchantId, req.auth!.outletId],
+    );
+    res.json(r.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+categoriesRouter.post('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => {
+  try {
+    if (!pool) throw new Error('Database tidak tersedia');
+    const v = input.parse(req.body);
+    const r = await pool.query(
+      'INSERT INTO categories(merchant_id,outlet_id,name,sort_order,is_active) VALUES($1,$2,$3,$4,$5) RETURNING id,name,sort_order "sortOrder",is_active "isActive"',
+      [req.auth!.merchantId, req.auth!.outletId, v.name, v.sortOrder ?? 0, v.isActive ?? true],
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+categoriesRouter.patch('/:id', allowRoles('MERCHANT_OWNER'), async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Kategori tidak ditemukan' });
+    if (!pool) throw new Error('Database tidak tersedia');
+    const v = input.partial().parse(req.body);
+    const fields: string[] = [];
+    const vals: unknown[] = [];
+    const keys: { [key: string]: string } = { name: 'name', sortOrder: 'sort_order', isActive: 'is_active' };
+    for (const [k, x] of Object.entries(v)) {
+      fields.push(`${keys[k]}=$${vals.length + 1}`);
+      vals.push(x);
+    }
+    if (!fields.length) return res.status(400).json({ error: 'Tidak ada perubahan' });
+    vals.push(req.params.id, req.auth!.merchantId, req.auth!.outletId);
+    const r = await pool.query(
+      `UPDATE categories SET ${fields.join(',')},updated_at=now() WHERE id=$${vals.length - 2} AND merchant_id=$${vals.length - 1} AND outlet_id=$${vals.length} RETURNING id,name,sort_order "sortOrder",is_active "isActive"`,
+      vals,
+    );
+    if (!r.rowCount) return res.status(404).json({ error: 'Kategori tidak ditemukan' });
+    res.json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+categoriesRouter.delete('/:id', allowRoles('MERCHANT_OWNER'), async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Kategori tidak ditemukan' });
+    if (!pool) throw new Error('Database tidak tersedia');
+    const r = await pool.query(
+      'UPDATE categories SET is_active=false,updated_at=now() WHERE id=$1 AND merchant_id=$2 AND outlet_id=$3 RETURNING id',
+      [req.params.id, req.auth!.merchantId, req.auth!.outletId],
+    );
+    if (!r.rowCount) return res.status(404).json({ error: 'Kategori tidak ditemukan' });
+    res.status(204).end();
+  } catch (e) {
+    next(e);
+  }
+});

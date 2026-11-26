@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../../database/client.ts';
-import { allowRoles, requireAuth } from '../../middleware/auth.ts';
+import { allowRoles, isUuid, requireAuth } from '../../middleware/auth.ts';
 
 export const superAdminRouter = Router();
 superAdminRouter.use(requireAuth, allowRoles('SUPER_ADMIN'));
@@ -11,22 +11,42 @@ superAdminRouter.get('/overview', async (_req, res, next) => {
     if (!pool) throw Error('Database tidak tersedia');
     const [metrics, merchants, plans, audits] = await Promise.all([
       pool.query(`
+        WITH latest_subs AS (
+          SELECT DISTINCT ON (s.merchant_id)
+            s.merchant_id,
+            s.plan_id,
+            CASE
+              WHEN s.status = 'TRIAL' AND s.trial_ends_at IS NOT NULL AND s.trial_ends_at < now() THEN 'EXPIRED'
+              WHEN s.status = 'ACTIVE' AND s.current_period_ends_at IS NOT NULL AND s.current_period_ends_at < now() THEN 'EXPIRED'
+              ELSE s.status
+            END AS effective_status
+          FROM subscriptions s
+          ORDER BY s.merchant_id, s.created_at DESC
+        )
         SELECT
           (SELECT count(*)::int FROM merchants) "totalMerchants",
-          (SELECT count(*)::int FROM subscriptions WHERE status = 'ACTIVE') "activeSubscriptions",
-          (SELECT count(*)::int FROM subscriptions WHERE status = 'TRIAL') "trialSubscriptions",
-          (SELECT count(*)::int FROM subscriptions WHERE status IN ('EXPIRED','SUSPENDED','CANCELLED')) "inactiveSubscriptions",
+          (SELECT count(*)::int FROM latest_subs WHERE effective_status = 'ACTIVE') "activeSubscriptions",
+          (SELECT count(*)::int FROM latest_subs WHERE effective_status = 'TRIAL') "trialSubscriptions",
+          (SELECT count(*)::int FROM latest_subs WHERE effective_status IN ('EXPIRED','SUSPENDED','CANCELLED')) "inactiveSubscriptions",
           (SELECT count(*)::int FROM orders WHERE payment_status = 'PAID') "totalPaidOrders",
           (SELECT coalesce(sum(total_amount),0)::bigint FROM orders WHERE payment_status = 'PAID')::text "totalGmv",
-          (SELECT coalesce(sum(p.monthly_price),0)::int FROM subscriptions s JOIN subscription_plans p ON p.id = s.plan_id WHERE s.status = 'ACTIVE') "mrr"
+          (SELECT coalesce(sum(p.monthly_price),0)::int FROM latest_subs ls JOIN subscription_plans p ON p.id = ls.plan_id WHERE ls.effective_status = 'ACTIVE') "mrr"
       `),
       pool.query(`
         SELECT
           m.id, m.name, m.slug, m.created_at "createdAt",
           u.email "ownerEmail", u.name "ownerName",
-          s.id "subscriptionId", s.status "subscriptionStatus",
+          s.id "subscriptionId",
+          CASE
+            WHEN s.status = 'TRIAL' AND s.trial_ends_at IS NOT NULL AND s.trial_ends_at < now() THEN 'EXPIRED'
+            WHEN s.status = 'ACTIVE' AND s.current_period_ends_at IS NOT NULL AND s.current_period_ends_at < now() THEN 'EXPIRED'
+            ELSE s.status
+          END "subscriptionStatus",
+          s.status "rawSubscriptionStatus",
           s.trial_ends_at "trialEndsAt", s.current_period_ends_at "currentPeriodEndsAt",
-          s.qr_ordering_enabled "qrOrderingEnabled", s.pos_enabled "posEnabled",
+          COALESCE(s.qr_ordering_enabled, false) "qrOrderingEnabled",
+          COALESCE(s.pos_enabled, false) "posEnabled",
+          COALESCE(s.notes, '') "notes",
           p.code "planCode", p.name "planName", p.monthly_price "monthlyPrice",
           (SELECT count(*)::int FROM orders o WHERE o.merchant_id = m.id AND o.payment_status = 'PAID') "paidOrders",
           (SELECT coalesce(sum(o.total_amount),0)::int FROM orders o WHERE o.merchant_id = m.id AND o.payment_status = 'PAID') "paidRevenue"
@@ -75,7 +95,7 @@ superAdminRouter.get('/overview', async (_req, res, next) => {
 
 const merchantSubUpdate = z.object({
   status: z.enum(['TRIAL', 'ACTIVE', 'EXPIRED', 'SUSPENDED', 'CANCELLED']),
-  planCode: z.enum(['basic', 'pro', 'business']).optional(),
+  planCode: z.string().trim().min(1).max(40).optional(),
   qrOrderingEnabled: z.boolean(),
   posEnabled: z.boolean(),
   extendDays: z.number().int().min(0).max(365).optional(),
@@ -84,6 +104,7 @@ const merchantSubUpdate = z.object({
 
 superAdminRouter.patch('/merchants/:merchantId/subscription', async (req, res, next) => {
   try {
+    if (!isUuid(req.params.merchantId)) return res.status(404).json({ error: 'Merchant tidak ditemukan' });
     if (!pool) throw Error('Database tidak tersedia');
     const v = merchantSubUpdate.parse(req.body);
     const client = await pool.connect();
@@ -106,7 +127,7 @@ superAdminRouter.patch('/merchants/:merchantId/subscription', async (req, res, n
       let planId = currentSub?.plan_id;
       if (v.planCode) {
         const plan = (
-          await client.query('SELECT id FROM subscription_plans WHERE code = $1', [v.planCode])
+          await client.query('SELECT id FROM subscription_plans WHERE code = $1', [v.planCode.toLowerCase()])
         ).rows[0];
         if (!plan) {
           await client.query('ROLLBACK');
@@ -115,7 +136,9 @@ superAdminRouter.patch('/merchants/:merchantId/subscription', async (req, res, n
         planId = plan.id;
       }
       if (!planId) {
-        const fallback = (await client.query("SELECT id FROM subscription_plans WHERE code = 'basic' LIMIT 1")).rows[0];
+        const fallback = (
+          await client.query('SELECT id FROM subscription_plans ORDER BY monthly_price ASC LIMIT 1')
+        ).rows[0];
         planId = fallback?.id;
       }
       if (!planId) {
@@ -182,6 +205,7 @@ const planUpdate = z.object({
 
 superAdminRouter.patch('/plans/:id', async (req, res, next) => {
   try {
+    if (!isUuid(req.params.id)) return res.status(404).json({ error: 'Paket tidak ditemukan' });
     if (!pool) throw Error('Database tidak tersedia');
     const v = planUpdate.parse(req.body);
     const client = await pool.connect();

@@ -1,53 +1,206 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../../database/client.ts';
-import { allowRoles, requireAuth } from '../../middleware/auth.ts';
+import { allowRoles, isUuid, requireAuth, requireMerchantContext } from '../../middleware/auth.ts';
+import { sanitizeCsvCell } from '../../middleware/security.ts';
 import { publishTenantEvent, publishTrackingEvent } from '../events/bus.ts';
 import { expireAbandonedOrders } from '../orders/service.ts';
 
-const input = z.object({ cashReceived: z.number().int().min(0).optional() });
+const DATE_PARAM_RE = /^\d{4}-\d{2}-\d{2}$/;
+const input = z.object({ cashReceived: z.number().int().min(0).max(200_000_000).optional() });
+
+function formatWibCsv(iso: string | Date | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return (
+    d.toLocaleString('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }) + ' WIB'
+  );
+}
+
+function buildPaymentWhere(
+  merchantId: string,
+  outletId: string,
+  query: Record<string, unknown>,
+): { params: unknown[]; whereExtra: string } {
+  const method = typeof query.method === 'string' ? query.method : 'ALL';
+  const status = typeof query.status === 'string' ? query.status : 'ALL';
+  const source = typeof query.source === 'string' ? query.source : 'ALL';
+  const q = typeof query.q === 'string' ? query.q.trim() : '';
+  const dateFrom = typeof query.dateFrom === 'string' ? query.dateFrom.trim() : '';
+  const dateTo = typeof query.dateTo === 'string' ? query.dateTo.trim() : '';
+
+  if (dateFrom && !DATE_PARAM_RE.test(dateFrom)) {
+    throw Object.assign(Error('Format tanggal awal tidak valid (gunakan YYYY-MM-DD)'), { status: 400 });
+  }
+  if (dateTo && !DATE_PARAM_RE.test(dateTo)) {
+    throw Object.assign(Error('Format tanggal akhir tidak valid (gunakan YYYY-MM-DD)'), { status: 400 });
+  }
+
+  const params: unknown[] = [merchantId, outletId];
+  const filters: string[] = [];
+  if (method !== 'ALL') {
+    params.push(method);
+    filters.push(`p.method = $${params.length}`);
+  }
+  if (status !== 'ALL') {
+    params.push(status);
+    filters.push(`p.status = $${params.length}`);
+  }
+  if (source !== 'ALL') {
+    params.push(source);
+    filters.push(`o.order_source = $${params.length}`);
+  }
+  if (q) {
+    params.push(`%${q}%`);
+    filters.push(`(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length})`);
+  }
+  if (dateFrom) {
+    params.push(dateFrom);
+    filters.push(`COALESCE(p.paid_at, p.created_at) >= ($${params.length}::timestamp AT TIME ZONE 'Asia/Jakarta')`);
+  }
+  if (dateTo) {
+    params.push(dateTo);
+    filters.push(
+      `COALESCE(p.paid_at, p.created_at) < (($${params.length}::timestamp + interval '1 day') AT TIME ZONE 'Asia/Jakarta')`,
+    );
+  }
+  return {
+    params,
+    whereExtra: filters.length ? ` AND ${filters.join(' AND ')}` : '',
+  };
+}
+
 export const paymentsRouter = Router();
-paymentsRouter.use(requireAuth);
+paymentsRouter.use(requireAuth, requireMerchantContext);
 
 paymentsRouter.get('/', async (req, res, next) => {
   try {
     if (!pool) throw Error('Database tidak tersedia');
     await expireAbandonedOrders(req.auth!.outletId).catch(() => 0);
-    const method = typeof req.query.method === 'string' ? req.query.method : 'ALL';
-    const status = typeof req.query.status === 'string' ? req.query.status : 'ALL';
-    const source = typeof req.query.source === 'string' ? req.query.source : 'ALL';
-    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
-    const params: unknown[] = [req.auth!.merchantId, req.auth!.outletId];
-    const filters: string[] = [];
-    if (method !== 'ALL') {
-      params.push(method);
-      filters.push(`p.method = $${params.length}`);
-    }
-    if (status !== 'ALL') {
-      params.push(status);
-      filters.push(`p.status = $${params.length}`);
-    }
-    if (source !== 'ALL') {
-      params.push(source);
-      filters.push(`o.order_source = $${params.length}`);
-    }
-    if (q) {
-      params.push(`%${q}%`);
-      filters.push(`(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length})`);
-    }
-    const whereExtra = filters.length ? ` AND ${filters.join(' AND ')}` : '';
-    const r = await pool.query(
-      `SELECT p.id, p.order_id "orderId", o.customer_name "customerName", o.order_source "orderSource", o.order_status "orderStatus", p.method, p.status, p.amount, p.cash_received "cashReceived", p.change_amount "changeAmount", p.created_at "createdAt", p.paid_at "paidAt", u.name "verifiedByName"
-       FROM payments p
-       JOIN orders o ON o.id = p.order_id
-       LEFT JOIN users u ON u.id = p.verified_by
-       WHERE o.merchant_id = $1 AND o.outlet_id = $2${whereExtra}
-       ORDER BY p.created_at DESC
-       LIMIT 200`,
-      params,
+    const paginated = req.query.paginated === '1';
+    const page = Math.max(1, parseInt(typeof req.query.page === 'string' ? req.query.page : '1', 10) || 1);
+    const pageSize = Math.min(
+      200,
+      Math.max(1, parseInt(typeof req.query.pageSize === 'string' ? req.query.pageSize : paginated ? '50' : '200', 10) || 50),
     );
-    res.json(r.rows);
+    const offset = (page - 1) * pageSize;
+
+    const { params, whereExtra } = buildPaymentWhere(req.auth!.merchantId, req.auth!.outletId, req.query as Record<string, unknown>);
+    const pagedParams = [...params, pageSize, offset];
+
+    const [rowsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT p.id, p.order_id "orderId", o.customer_name "customerName", o.order_source "orderSource",
+                o.order_status "orderStatus", p.method, p.status, p.amount,
+                p.cash_received "cashReceived", p.change_amount "changeAmount",
+                p.created_at "createdAt", p.paid_at "paidAt", u.name "verifiedByName"
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         LEFT JOIN users u ON u.id = p.verified_by
+         WHERE o.merchant_id = $1 AND o.outlet_id = $2${whereExtra}
+         ORDER BY COALESCE(p.paid_at, p.created_at) DESC, p.id DESC
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        pagedParams,
+      ),
+      pool.query(
+        `SELECT count(*)::int total
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         WHERE o.merchant_id = $1 AND o.outlet_id = $2${whereExtra}`,
+        params,
+      ),
+    ]);
+
+    const total = countResult.rows[0]?.total ?? 0;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    res.setHeader('X-Total-Count', String(total));
+
+    if (paginated) {
+      return res.json({
+        payments: rowsResult.rows,
+        pagination: { page, pageSize, total, totalPages },
+      });
+    }
+    res.json(rowsResult.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+paymentsRouter.get('/export.csv', async (req, res, next) => {
+  try {
+    if (!pool) throw Error('Database tidak tersedia');
+    await expireAbandonedOrders(req.auth!.outletId).catch(() => 0);
+    const { params, whereExtra } = buildPaymentWhere(req.auth!.merchantId, req.auth!.outletId, req.query as Record<string, unknown>);
+    const rows = (
+      await pool.query(
+        `SELECT p.id, p.order_id "orderId", p.created_at "createdAt", p.paid_at "paidAt",
+                o.customer_name "customerName", o.order_source "orderSource",
+                o.order_status "orderStatus", p.method, p.status, p.amount,
+                p.cash_received "cashReceived", p.change_amount "changeAmount",
+                u.name "verifiedByName"
+         FROM payments p
+         JOIN orders o ON o.id = p.order_id
+         LEFT JOIN users u ON u.id = p.verified_by
+         WHERE o.merchant_id = $1 AND o.outlet_id = $2${whereExtra}
+         ORDER BY COALESCE(p.paid_at, p.created_at) DESC, p.id DESC
+         LIMIT 50000`,
+        params,
+      )
+    ).rows;
+
+    const header = [
+      'ID Pembayaran',
+      'ID Pesanan',
+      'Waktu Dibuat (WIB)',
+      'Pelanggan',
+      'Sumber',
+      'Status Pesanan',
+      'Metode',
+      'Status Pembayaran',
+      'Jumlah (Rp)',
+      'Tunai Diterima (Rp)',
+      'Kembalian (Rp)',
+      'Waktu Lunas (WIB)',
+      'Diverifikasi Oleh',
+    ].map(sanitizeCsvCell);
+
+    const dataLines = rows.map((p) =>
+      [
+        p.id,
+        p.orderId,
+        formatWibCsv(p.createdAt),
+        p.customerName,
+        p.orderSource,
+        p.orderStatus,
+        p.method === 'CASH' ? 'Tunai' : p.method,
+        p.status,
+        p.amount,
+        p.cashReceived ?? '',
+        p.changeAmount ?? '',
+        formatWibCsv(p.paidAt),
+        p.verifiedByName ?? '',
+      ]
+        .map(sanitizeCsvCell)
+        .join(','),
+    );
+
+    const csv = '\uFEFF' + [header.join(','), ...dataLines].join('\n');
+    const todayWib = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Jakarta' });
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="warkopos-payments-${todayWib}.csv"`);
+    res.send(csv);
   } catch (e) {
     next(e);
   }
@@ -58,7 +211,27 @@ paymentsRouter.get('/pending', async (req, res, next) => {
     if (!pool) throw Error('Database tidak tersedia');
     await expireAbandonedOrders(req.auth!.outletId).catch(() => 0);
     const r = await pool.query(
-      "SELECT o.id,o.customer_name \"customerName\",o.total_amount \"totalAmount\",o.created_at \"createdAt\",o.order_type \"orderType\",o.fulfillment_method \"fulfillmentMethod\",o.order_source \"orderSource\",t.name \"tableName\",p.method,p.status FROM orders o JOIN payments p ON p.order_id=o.id LEFT JOIN dining_tables t ON t.id=o.table_id WHERE o.merchant_id=$1 AND o.outlet_id=$2 AND o.order_status='AWAITING_PAYMENT' ORDER BY o.created_at",
+      `SELECT o.id, o.customer_name "customerName", o.total_amount "totalAmount",
+              o.created_at "createdAt", o.order_type "orderType",
+              o.fulfillment_method "fulfillmentMethod", o.order_source "orderSource",
+              t.name "tableName", p.method, p.status,
+              COALESCE((
+                SELECT json_agg(
+                  json_build_object(
+                    'productName', oi.product_name,
+                    'unitPrice', oi.unit_price,
+                    'quantity', oi.quantity,
+                    'selections', oi.selections
+                  ) ORDER BY oi.created_at, oi.id
+                )
+                FROM order_items oi WHERE oi.order_id = o.id
+              ), '[]'::json) items
+       FROM orders o
+       JOIN payments p ON p.order_id = o.id
+       LEFT JOIN dining_tables t ON t.id = o.table_id
+       WHERE o.merchant_id = $1 AND o.outlet_id = $2
+         AND o.order_status = 'AWAITING_PAYMENT'
+       ORDER BY o.created_at ASC`,
       [req.auth!.merchantId, req.auth!.outletId],
     );
     res.json(r.rows);
@@ -69,8 +242,9 @@ paymentsRouter.get('/pending', async (req, res, next) => {
 
 paymentsRouter.post('/:orderId/confirm', allowRoles('MERCHANT_OWNER', 'CASHIER'), async (req, res, next) => {
   try {
+    if (!isUuid(req.params.orderId)) return res.status(404).json({ error: 'Pesanan tidak ditemukan' });
     if (!pool) throw Error('Database tidak tersedia');
-    const v = input.parse(req.body);
+    const v = input.parse(req.body ?? {});
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
@@ -152,6 +326,7 @@ paymentsRouter.post('/:orderId/confirm', allowRoles('MERCHANT_OWNER', 'CASHIER')
 
 paymentsRouter.post('/:orderId/refund', allowRoles('MERCHANT_OWNER'), async (req, res, next) => {
   try {
+    if (!isUuid(req.params.orderId)) return res.status(404).json({ error: 'Pesanan tidak ditemukan' });
     if (!pool) throw Error('Database tidak tersedia');
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 200) : '';
     const c = await pool.connect();

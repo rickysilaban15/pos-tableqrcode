@@ -8,21 +8,30 @@ import { env, requireAuthConfig } from '../../config/env.ts';
 import { requireAuth } from '../../middleware/auth.ts';
 
 const credentials = z.object({
-  email: z.string().email().max(255).transform((v) => v.toLowerCase()),
+  email: z.string().trim().email().max(255).transform((v) => v.toLowerCase()),
   password: z.string().min(10).max(128),
 });
+
 const registration = credentials.extend({
   name: z.string().trim().min(2).max(100),
   businessName: z.string().trim().min(2).max(100),
   outletName: z.string().trim().min(2).max(100),
-  planCode: z.enum(['basic', 'pro', 'business']).default('basic'),
+  planCode: z
+    .string()
+    .trim()
+    .min(1)
+    .max(40)
+    .default('basic')
+    .transform((v) => v.toLowerCase()),
 });
+
 const slug = (value: string) =>
   value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '')
     .slice(0, 60);
+
 const cookieOptions = {
   httpOnly: true,
   sameSite: 'lax' as const,
@@ -46,6 +55,25 @@ authRouter.post('/register', async (req, res, next) => {
         await client.query('ROLLBACK');
         return res.status(409).json({ error: 'Email sudah terdaftar' });
       }
+
+      let plan = (
+        await client.query(
+          'SELECT id, code, name, trial_days FROM subscription_plans WHERE code = $1 AND is_active = true LIMIT 1',
+          [input.planCode],
+        )
+      ).rows[0];
+      if (!plan) {
+        plan = (
+          await client.query(
+            'SELECT id, code, name, trial_days FROM subscription_plans WHERE is_active = true ORDER BY monthly_price ASC LIMIT 1',
+          )
+        ).rows[0];
+      }
+      if (!plan) {
+        await client.query('ROLLBACK');
+        return res.status(503).json({ error: 'Paket langganan belum tersedia. Hubungi administrator.' });
+      }
+
       const user = (
         await client.query(
           'INSERT INTO users(email,password_hash,name) VALUES($1,$2,$3) RETURNING id,email,name',
@@ -60,7 +88,7 @@ authRouter.post('/register', async (req, res, next) => {
       ).rows[0];
       const outlet = (
         await client.query(
-          'INSERT INTO outlets(merchant_id,name,slug) VALUES($1,$2,$3) RETURNING id,name',
+          'INSERT INTO outlets(merchant_id,name,slug) VALUES($1,$2,$3) RETURNING id,name,slug',
           [merchant.id, input.outletName, slug(input.outletName) || 'utama'],
         )
       ).rows[0];
@@ -72,24 +100,38 @@ authRouter.post('/register', async (req, res, next) => {
         'INSERT INTO outlet_settings(outlet_id,merchant_id,operating_hours) VALUES($1,$2,$3) ON CONFLICT(outlet_id) DO NOTHING',
         [outlet.id, merchant.id, '08:00 - 22:00 WIB'],
       );
-      const plan = (
-        await client.query('SELECT id,trial_days FROM subscription_plans WHERE code=$1 LIMIT 1', [input.planCode])
-      ).rows[0];
-      if (plan) {
-        await client.query(
-          "INSERT INTO subscriptions(merchant_id,plan_id,status,trial_ends_at,qr_ordering_enabled,pos_enabled) VALUES($1,$2,'TRIAL',now() + ($3 || ' days')::interval,true,true)",
-          [merchant.id, plan.id, plan.trial_days],
-        );
-      }
+      await client.query(
+        "INSERT INTO subscriptions(merchant_id,plan_id,status,trial_ends_at,qr_ordering_enabled,pos_enabled) VALUES($1,$2,'TRIAL',now() + ($3 || ' days')::interval,true,true)",
+        [merchant.id, plan.id, plan.trial_days],
+      );
+      await client.query(
+        'INSERT INTO audit_logs(merchant_id,actor_user_id,action,entity_type,entity_id,payload) VALUES($1,$2,$3,$4,$5,$6)',
+        [
+          merchant.id,
+          user.id,
+          'MERCHANT_REGISTERED',
+          'merchant',
+          merchant.id,
+          JSON.stringify({ businessName: merchant.name, outletName: outlet.name, planCode: plan.code }),
+        ],
+      );
       await client.query('COMMIT');
       const token = jwt.sign(
         { sub: user.id, merchantId: merchant.id, outletId: outlet.id, role: 'MERCHANT_OWNER' },
         jwtSecret,
         { expiresIn: '7d' },
       );
-      res.cookie('laris_session', token, cookieOptions).status(201).json({ user, merchant, outlet, role: 'MERCHANT_OWNER' });
+      res.cookie('laris_session', token, cookieOptions).status(201).json({
+        user,
+        merchant,
+        outlet,
+        role: 'MERCHANT_OWNER',
+      });
     } catch (error) {
       await client.query('ROLLBACK');
+      if ((error as { code?: string })?.code === '23505') {
+        return res.status(409).json({ error: 'Email sudah terdaftar' });
+      }
       throw error;
     } finally {
       client.release();
@@ -111,6 +153,7 @@ authRouter.post('/login', async (req, res, next) => {
        LEFT JOIN merchant_memberships m ON m.user_id = u.id
        LEFT JOIN outlets o ON o.merchant_id = m.merchant_id
        WHERE u.email = $1 AND u.is_active = true
+       ORDER BY m.created_at ASC NULLS LAST, o.created_at ASC NULLS LAST
        LIMIT 1`,
       [input.email],
     );
@@ -128,8 +171,8 @@ authRouter.post('/login', async (req, res, next) => {
     const token = jwt.sign(
       {
         sub: user.id,
-        merchantId: user.merchant_id ?? '',
-        outletId: user.outlet_id ?? '',
+        merchantId: role === 'SUPER_ADMIN' ? '' : (user.merchant_id ?? ''),
+        outletId: role === 'SUPER_ADMIN' ? '' : (user.outlet_id ?? ''),
         role,
       },
       jwtSecret,
@@ -137,8 +180,8 @@ authRouter.post('/login', async (req, res, next) => {
     );
     return res.cookie('laris_session', token, cookieOptions).json({
       user: { id: user.id, email: user.email, name: user.name },
-      merchantId: user.merchant_id ?? '',
-      outletId: user.outlet_id ?? '',
+      merchantId: role === 'SUPER_ADMIN' ? '' : (user.merchant_id ?? ''),
+      outletId: role === 'SUPER_ADMIN' ? '' : (user.outlet_id ?? ''),
       role,
     });
   } catch (error) {
@@ -147,6 +190,7 @@ authRouter.post('/login', async (req, res, next) => {
 });
 
 authRouter.post('/logout', (_req, res) =>
-  res.clearCookie('laris_session', { path: '/' }).status(204).end(),
+  res.clearCookie('laris_session', { path: '/', httpOnly: true, sameSite: 'lax', secure: env.NODE_ENV === 'production' }).status(204).end(),
 );
+
 authRouter.get('/me', requireAuth, (req, res) => res.json(req.auth));

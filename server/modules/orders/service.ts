@@ -9,6 +9,7 @@ export type CheckoutItem = {
   addonIds: string[];
   notes?: string;
 };
+
 export type CheckoutInput = {
   customerName: string;
   idempotencyKey: string;
@@ -17,12 +18,14 @@ export type CheckoutInput = {
   orderType: 'DINE_IN' | 'TAKEAWAY';
   fulfillmentMethod: 'TABLE_SERVICE' | 'PICKUP_COUNTER';
 };
+
 export type OrderContext = {
   merchantId: string;
   outletId: string;
   tableId?: string | null;
   orderSource?: 'QR' | 'POS';
 };
+
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
 /** Shared QR and cashier transaction writer. Browser prices are intentionally ignored. */
@@ -43,7 +46,12 @@ export async function createCheckoutOrder(
 
     const existing = (
       await client.query(
-        'SELECT id,total_amount "totalAmount",order_status "orderStatus",payment_status "paymentStatus",order_source "orderSource",request_hash FROM orders WHERE outlet_id=$1 AND idempotency_key=$2',
+        `SELECT o.id, o.total_amount "totalAmount", o.order_status "orderStatus",
+                o.payment_status "paymentStatus", o.order_source "orderSource",
+                o.request_hash, p.change_amount "changeAmount"
+         FROM orders o
+         LEFT JOIN payments p ON p.order_id = o.id
+         WHERE o.outlet_id = $1 AND o.idempotency_key = $2`,
         [context.outletId, input.idempotencyKey],
       )
     ).rows[0];
@@ -54,13 +62,25 @@ export async function createCheckoutOrder(
           status: 409,
         });
       }
-      return { ...existing, idempotent: true };
+      const { request_hash: _rh, changeAmount, ...rest } = existing;
+      return {
+        ...rest,
+        change: changeAmount !== null && changeAmount !== undefined ? Number(changeAmount) : undefined,
+        idempotent: true,
+      };
     }
 
     const ids = input.items.map((item) => item.productId);
     const products = (
       await client.query(
-        'SELECT id,name,price FROM products WHERE merchant_id=$1 AND outlet_id=$2 AND is_active AND id=ANY($3::uuid[])',
+        `SELECT p.id, p.name, p.price
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.category_id
+         WHERE p.merchant_id = $1
+           AND p.outlet_id = $2
+           AND p.is_active = true
+           AND (p.category_id IS NULL OR c.is_active = true)
+           AND p.id = ANY($3::uuid[])`,
         [context.merchantId, context.outletId, ids],
       )
     ).rows;
@@ -69,30 +89,60 @@ export async function createCheckoutOrder(
     }
     const catalog = new Map(products.map((product) => [product.id, product]));
     let total = 0;
-    const lines: any[] = [];
+    const lines: {
+      item: CheckoutItem;
+      product: { id: string; name: string; price: number };
+      unit: number;
+      selections: {
+        variants: { id: string; group_name: string; option_name: string; price_delta: number }[];
+        addons: { id: string; name: string; price: number }[];
+        note: string;
+      };
+    }[] = [];
+
     for (const item of input.items) {
-      const product = catalog.get(item.productId);
+      const product = catalog.get(item.productId)!;
       const variants = await client.query(
-        'SELECT id,group_name,option_name,price_delta FROM product_variants WHERE product_id=$1 AND id=ANY($2::uuid[])',
+        'SELECT id, group_name, option_name, price_delta FROM product_variants WHERE product_id = $1 AND id = ANY($2::uuid[])',
         [product.id, item.variantIds],
       );
       const addons = await client.query(
-        'SELECT id,name,price FROM product_addons WHERE product_id=$1 AND is_active AND id=ANY($2::uuid[])',
+        'SELECT id, name, price FROM product_addons WHERE product_id = $1 AND is_active = true AND id = ANY($2::uuid[])',
         [product.id, item.addonIds],
       );
       const required = await client.query(
-        'SELECT DISTINCT group_name FROM product_variants WHERE product_id=$1 AND required',
+        'SELECT DISTINCT group_name FROM product_variants WHERE product_id = $1 AND required = true',
         [product.id],
       );
+
+      // Enforce single choice per variant group and validate all requested IDs + required groups.
+      const chosenGroups = new Set<string>();
+      let duplicateGroup = false;
+      for (const v of variants.rows) {
+        const gKey = String(v.group_name).toLowerCase();
+        if (chosenGroups.has(gKey)) {
+          duplicateGroup = true;
+          break;
+        }
+        chosenGroups.add(gKey);
+      }
+
       if (
+        duplicateGroup ||
         variants.rows.length !== new Set(item.variantIds).size ||
         addons.rows.length !== new Set(item.addonIds).size ||
         required.rows.some((row) => !variants.rows.some((v) => v.group_name === row.group_name))
       ) {
-        throw Object.assign(Error('Kustomisasi produk tidak valid atau pilihan wajib belum lengkap'), {
-          status: 400,
-        });
+        throw Object.assign(
+          Error(
+            duplicateGroup
+              ? 'Hanya satu opsi yang dapat dipilih pada setiap grup varian'
+              : 'Kustomisasi produk tidak valid atau pilihan wajib belum lengkap',
+          ),
+          { status: 400 },
+        );
       }
+
       const unit =
         product.price +
         variants.rows.reduce((sum, value) => sum + value.price_delta, 0) +
@@ -107,8 +157,13 @@ export async function createCheckoutOrder(
     }
 
     const paid = input.paymentMethod === 'CASH' && options.confirmCash !== undefined;
-    if (paid && options.confirmCash! < total) {
-      throw Object.assign(Error('Nominal tunai kurang'), { status: 400 });
+    if (paid) {
+      if (options.confirmCash! < total) {
+        throw Object.assign(Error('Nominal tunai kurang'), { status: 400 });
+      }
+      if (options.confirmCash! > 200_000_000) {
+        throw Object.assign(Error('Nominal tunai melebihi batas maksimum transaksi'), { status: 400 });
+      }
     }
     const paymentStatus = paid
       ? 'PAID'

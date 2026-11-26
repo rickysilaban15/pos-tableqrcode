@@ -1,36 +1,26 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { pool } from '../../database/client.ts';
-import { allowRoles, requireAuth } from '../../middleware/auth.ts';
+import { allowRoles, requireAuth, requireMerchantContext } from '../../middleware/auth.ts';
+import { isSafeBaseUrl, isSafeImageOrUrl } from '../../middleware/security.ts';
 import { publishTenantEvent } from '../events/bus.ts';
-
-function isSafeImageOrUrl(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) return true;
-  const lower = trimmed.toLowerCase();
-  return (
-    lower.startsWith('https://') ||
-    lower.startsWith('http://') ||
-    lower.startsWith('/') ||
-    lower.startsWith('data:image/')
-  );
-}
-
-function isSafeBaseUrl(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) return true;
-  if (/^(javascript|data|vbscript):/i.test(trimmed)) return false;
-  try {
-    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
 
 const input = z
   .object({
     name: z.string().trim().min(2).max(100),
+    slug: z
+      .string()
+      .trim()
+      .max(60)
+      .optional()
+      .transform((val) =>
+        val
+          ? val
+              .toLowerCase()
+              .replace(/[^a-z0-9-]+/g, '-')
+              .replace(/^-|-$/g, '')
+          : undefined,
+      ),
     description: z.string().trim().max(300).default(''),
     address: z.string().trim().max(200).default(''),
     whatsapp: z.string().trim().max(40).default(''),
@@ -60,7 +50,7 @@ const input = z
 const select = `SELECT m.name, o.slug, s.description, s.address, s.whatsapp, s.logo_url "logoUrl", s.operating_hours "operatingHours", s.is_open "isOpen", s.enable_dine_in "enableDineIn", s.enable_takeaway "enableTakeaway", s.enable_table_service "enableTableService", s.enable_pickup_counter "enablePickupCounter", s.qris_image_url "qrisImageUrl", s.qr_base_url "qrBaseUrl" FROM outlets o JOIN merchants m ON m.id=o.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=o.id WHERE o.id=$1 AND o.merchant_id=$2`;
 
 export const settingsRouter = Router();
-settingsRouter.use(requireAuth);
+settingsRouter.use(requireAuth, requireMerchantContext);
 
 settingsRouter.get('/', async (req, res, next) => {
   try {
@@ -99,6 +89,17 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
         v.name,
         req.auth!.merchantId,
       ]);
+      let finalSlug: string | undefined = v.slug;
+      if (v.slug && v.slug.length >= 2) {
+        const updatedOutlet = await c.query(
+          `UPDATE outlets SET slug = $1, updated_at = now()
+           WHERE id = $2 AND merchant_id = $3
+             AND NOT EXISTS (SELECT 1 FROM outlets o2 WHERE o2.merchant_id = $3 AND o2.slug = $1 AND o2.id <> $2)
+           RETURNING slug`,
+          [v.slug, req.auth!.outletId, req.auth!.merchantId],
+        );
+        finalSlug = updatedOutlet.rows[0]?.slug ?? v.slug;
+      }
       await c.query(
         'INSERT INTO outlet_settings(outlet_id,merchant_id,description,address,whatsapp,logo_url,operating_hours,is_open,enable_dine_in,enable_takeaway,enable_table_service,enable_pickup_counter,qris_image_url,qr_base_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(outlet_id) DO UPDATE SET description=EXCLUDED.description,address=EXCLUDED.address,whatsapp=EXCLUDED.whatsapp,logo_url=EXCLUDED.logo_url,operating_hours=EXCLUDED.operating_hours,is_open=EXCLUDED.is_open,enable_dine_in=EXCLUDED.enable_dine_in,enable_takeaway=EXCLUDED.enable_takeaway,enable_table_service=EXCLUDED.enable_table_service,enable_pickup_counter=EXCLUDED.enable_pickup_counter,qris_image_url=EXCLUDED.qris_image_url,qr_base_url=EXCLUDED.qr_base_url,updated_at=now()',
         [
@@ -126,6 +127,7 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
       });
       res.json({
         ...v,
+        ...(finalSlug ? { slug: finalSlug } : {}),
         logoUrl: v.logoUrl.trim(),
         qrisImageUrl: v.qrisImageUrl.trim(),
         qrBaseUrl: v.qrBaseUrl.trim(),
