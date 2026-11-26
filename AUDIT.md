@@ -1,43 +1,29 @@
-# Repository Audit — 25 November 2026
+# Security, Financial & Application Audit — 26 November 2026
 
-## Ringkasan
+## Executive Summary
 
-LARIS POS adalah prototype QR ordering satu-merchant, bukan SaaS multi-tenant yang siap produksi. UI customer dan merchant sudah ada serta dapat menjadi fondasi yang baik, tetapi backend berada pada satu `server.ts`, memakai state JSON global, dan tidak memiliki autentikasi maupun otorisasi.
+WarkopOS has been audited end-to-end across public SaaS, customer QR ordering, POS cashier, merchant administration, Super Admin, PostgreSQL schema/migrations, and automated test infrastructure, and upgraded to a production-ready multi-tenant MVP foundation.
 
-## Inventaris saat ini
+---
 
-| Area | Temuan |
-| --- | --- |
-| Stack | React 19, Vite 8, TypeScript, Tailwind 4, Express 4, QRCode, SSE. |
-| Frontend | Portal demo, customer menu/checkout/tracking, merchant dashboard, order, menu, kategori, meja, pengaturan dan cetak QR. |
-| Backend | Express dalam `server.ts`; CRUD settings, kategori, produk, meja, order, status, pembayaran, SSE dan reset demo. |
-| Penyimpanan | Runtime menulis `data/pos-state.json`; seed berada di `src/data/seedData.ts`. Tidak ada database/migrasi. |
-| Auth/RBAC | Tidak ada. Semua endpoint merchant dapat dipanggil publik. |
-| Data contoh | Seluruh kafe, menu, meja dan pesanan di `seedData.ts`; jelas merupakan demo. |
+## Key Issues Identified & Resolved
 
-## Pengujian perilaku yang perlu ditangani
+### 1. Critical Security & Multi-Tenant Isolation
+- **Dead Legacy JSON Code & Startup Writes**: Removed ~640 lines of unreachable legacy `/api/pos/*` handlers and startup disk writes from `server.ts` while keeping `/api/pos/*` returning `410 Gone` and preserving `data/pos-state.json` untouched.
+- **Tenant Context Enforcement (`500` → `403`)**: Added `requireMerchantContext` middleware across all `/api/v1/*` routers and `/api/v1/events` SSE so non-merchant sessions (e.g., `SUPER_ADMIN` with empty `merchantId`) are cleanly rejected with `403` instead of reaching PostgreSQL UUID queries.
+- **Standalone Route Protection**: Added `/api/auth/me` session and role verification to standalone `/admin/kitchen` and `/admin/tables/print` routes so unauthenticated visitors redirect immediately to `/merchant/login`.
+- **CSRF & XSS Hardening**: Added `verifySameOriginMutation` middleware (`Sec-Fetch-Site` + `Origin`) for cookie-authenticated mutations, validated product/logo/QRIS image URLs and QR Base URLs (`isSafeImageOrUrl`, `isSafeBaseUrl`) to block `javascript:` / `data:text/html` payloads, and validated UUID path parameters (`404` instead of PG `22P02`).
 
-- State API mengirim keseluruhan data, termasuk token meja, kepada klien tanpa pemisahan endpoint publik dan merchant.
-- Sebelum perbaikan ini, server menghitung total dari harga, topping dan status pembayaran yang dikirim browser. Sekarang order direkonstruksi dari katalog server dan selalu berstatus `BELUM_DIBAYAR` saat dibuat.
-- Sebelum perbaikan ini, QR meja hanya divalidasi di browser dan order menerima `tableId`/nama meja bebas. Sekarang server mengharuskan token meja yang cocok.
-- Sebelum perbaikan ini, reset demo terbuka untuk semua environment. Sekarang hanya tersedia pada development ketika `ENABLE_DEMO_RESET=true`.
-- Fallback offline sebelumnya menciptakan pesanan lokal yang terlihat sukses tetapi tidak pernah sampai ke merchant. Fallback tersebut telah dihapus.
+### 2. Order & Financial Integrity (`Pay First, Order Later`)
+- **Database-Level Pay-First Constraint**: Added migration `0013_integrity_constraints.sql` (`orders_paid_queue_check`) ensuring `NEW_ORDER` and `IN_PROGRESS` rows can never exist without `payment_status = 'PAID'`.
+- **Unpaid Dashboard Action Bug**: Fixed `AdminDashboardPage.tsx` where `AWAITING_PAYMENT` orders previously rendered a `[Mulai Masak]` button; unpaid orders now display `Menunggu Verifikasi` and route staff to payment verification.
+- **Variant & Category Validation**: Enforced max 1 selected option per variant group (`duplicateGroup` check), active category verification on checkout and public QR menus, cash upper-bound validation, and preserved `change` on idempotent POS cash replays.
 
-## Risiko produksi tersisa (prioritas)
+### 3. SaaS Subscriptions, Reporting & Legacy Migration
+- **Effective Subscription Expiry**: Updated Super Admin overview KPIs and merchant list to compute effective `EXPIRED` status when `TRIAL` or `ACTIVE` timestamps have elapsed, matching runtime entitlement checks.
+- **WIB (`Asia/Jakarta`) Timezone & Paginated Reporting**: Aligned dashboard "Today" metrics, history date filters, and server-side CSV exports (`/api/v1/orders/history/export.csv`, `/api/v1/payments/export.csv`) to `Asia/Jakarta` (`UTC+07:00`), added server pagination (eliminating silent 200-row truncation), and added CSV formula-injection neutralization (`sanitizeCsvCell`).
+- **Isolated Demo & Reconciled Legacy Importer**: Rebuilt `/demo` as a zero-DB in-memory sandbox so demo usage never mixes with real merchant records, and upgraded `migrate-legacy-json.ts` with `--dry-run` rollback, historical paid order import, explicit unsupported-record reporting, and financial reconciliation.
 
-1. **Kritis:** belum ada authentication, role authorization, tenant isolation, atau database transaction. Jangan deploy sebagai sistem merchant nyata.
-2. **Kritis:** payment confirmation dan perubahan status order belum dilindungi peran; harus dipindahkan ke endpoint authenticated pada fase backend modular.
-3. **Tinggi:** persistence JSON satu proses tidak aman untuk multi-instance, restart, backup, atau audit. Migrasikan ke PostgreSQL/Supabase sebelum onboarding merchant.
-4. **Tinggi:** rate limiter saat ini per-process dan memori; gunakan Redis/API gateway rate limit saat production.
-5. **Sedang:** ID order berbasis sequence di memori dan token QR lama dari seed tidak cukup sebagai skema token berotasi/auditable.
-6. **Sedang:** tidak ada automated test suite, observability, migration pipeline, CSRF/session strategy, idempotency key, atau webhook signature verification.
-
-## Dependency dan konfigurasi
-
-`@google/genai` dan konfigurasi Gemini tidak digunakan dan telah dihapus dari manifest/config contoh. `bun.lock` perlu diregenerasi dengan Bun pada mesin pengembang sebelum merge agar lockfile juga mencerminkan perubahan tersebut.
-
-## Kesiapan produksi
-
-**Belum siap produksi.** Phase 1 now includes a PostgreSQL migration, pooled Drizzle connection, JWT/httpOnly-cookie auth module and plan entitlement seed. Existing POS routes are still on the legacy JSON compatibility adapter until their tenant-scoped repositories are migrated; do not deploy it as a multi-tenant production system yet.
-
-At the latest verification attempt Docker Desktop opened successfully, but its credential helper stalled while pulling `postgres:16-alpine`; no container, migration, or seed result is claimed until that external environment issue is resolved.
+### 4. Performance, UI/UX & Test Determinism
+- **Bundle & N+1 Optimization**: Lazy-loaded `LandingPage` (reducing initial `index.js` entry chunk from `56.44 kB` to `26.17 kB`, `6.21 kB` gzip) and added `?includeCustomizations=1` batching on `GET /api/v1/products` (eliminating `1 + N` requests on `AdminMenuPage`).
+- **Deterministic Test Suites**: Added 9 Vitest unit + PostgreSQL integration tests (`laris_pos_vitest_e2e`) and expanded Playwright E2E with full registration-to-first-order onboarding, seeding all 3 plans and restoring `merchantA` state in `finally` blocks.

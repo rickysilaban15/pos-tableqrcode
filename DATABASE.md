@@ -1,25 +1,54 @@
-# Database Development
+# Database Guide & Schema Reference
 
-This project uses PostgreSQL 16 and Drizzle ORM (`server/database/schema.ts`). npm is the sole package manager; `bun.lock` was removed deliberately.
+WarkopOS uses **PostgreSQL 16** as its sole operational source of truth, paired with **Drizzle ORM** (`server/database/schema.ts`) and versioned SQL migrations (`server/database/migrations/0000_*.sql` – `0013_*.sql`).
 
-## Local macOS / Apple Silicon
+---
 
-1. Start Docker Desktop.
-2. `docker compose up -d`
-3. Copy `.env.example` to `.env` and set `DATABASE_URL=postgresql://laris:laris_local_only@127.0.0.1:5433/laris_pos` plus a random `JWT_SECRET` of at least 32 characters.
-4. `npm install`
-5. `npm run db:migrate`
-6. `npm run db:seed`
-7. `npm run dev`
+## 1. Local PostgreSQL Setup (Port 5433 Isolation)
 
-The Compose port is explicitly bound to `127.0.0.1:5433`, so local PostgreSQL is not exposed on the LAN. Port 5432 was already owned by an unrelated local PostgreSQL instance on the development machine.
+Host port `5433` is used exclusively so any unrelated PostgreSQL service on `5432` is never touched:
 
-The migration runner records applied files in `_laris_migrations` and runs every migration in one database transaction. `db:seed` is idempotent and creates Basic, Pro and Business plans with feature entitlements.
+```bash
+# 1. Start isolated PostgreSQL 16 container on 127.0.0.1:5433
+docker compose up -d
 
-## Data migration
+# 2. Apply all versioned SQL migrations (0000 through 0013)
+npm run db:migrate
 
-The legacy JSON state remains temporarily for compatibility with the existing demo routes. It is not a production migration source. Before enabling PostgreSQL-only production mode, export each merchant's legacy state, map it to merchant/outlet records, import it in a transaction, reconcile totals, and verify tenant boundaries. Do not point production at the JSON data directory.
+# 3. Seed canonical SaaS plans (Basic, Pro, Business) idempotently
+npm run db:seed
+```
 
-## Security model
+### Automated Test Databases
+- **Vitest Integration Suite**: Uses `laris_pos_vitest_e2e` on port `5433`.
+- **Playwright E2E Suite**: Uses `laris_pos_e2e` on port `5433`.
+- Both test harnesses refuse to run `TRUNCATE` unless the target database name ends with `_e2e`, protecting active development and business data in `laris_pos`.
 
-`merchant_id` and `outlet_id` scope business records. Authenticated claims contain tenant context and must be used by every protected repository query; browser-supplied tenant IDs are not authority. Row-level security is a planned additional PostgreSQL guard after the feature repositories are moved from the legacy adapter.
+---
+
+## 2. Core Tables & Multi-Tenant Integrity
+
+- **Identity & SaaS**: `users` (`is_super_admin`, `is_active`), `merchants`, `outlets`, `outlet_settings`, `merchant_memberships` (`MERCHANT_OWNER`, `CASHIER`), `subscription_plans`, `plan_features`, `subscriptions` (`TRIAL`, `ACTIVE`, `EXPIRED`, `SUSPENDED`, `CANCELLED`).
+- **Catalog & Tables**: `categories`, `products`, `product_variants`, `product_addons`, `dining_tables`, `table_qr_codes` (`token_hash`, `public_token`, `revoked_at`), `legacy_qr_mappings`, `table_sessions`.
+- **Transactions & Audit**: `orders`, `order_items` (immutable snapshots + JSONB `selections`), `order_item_addons`, `payments`, `audit_logs`.
+
+### Key Database Constraints & Indexes
+- `orders_merchant_idempotency_idx`: Unique `(merchant_id, idempotency_key)` preventing duplicate order submission under retries or double taps.
+- `orders_paid_queue_check` (`0013_integrity_constraints.sql`): `CHECK (order_status NOT IN ('NEW_ORDER', 'IN_PROGRESS') OR payment_status = 'PAID')` — database-level guarantee of **Pay First, Order Later**.
+- `orders_history_idx` & `payments_status_created_idx`: Composite indexes supporting fast `Asia/Jakarta` date-filtered pagination and CSV exports.
+
+---
+
+## 3. Legacy JSON Migration (`server/scripts/migrate-legacy-json.ts`)
+
+`data/pos-state.json` is preserved strictly as a read-only legacy archive and is never read or written by the runtime server.
+
+- Validate & test migration without committing changes:
+  ```bash
+  npx tsx server/scripts/migrate-legacy-json.ts --dry-run
+  ```
+- Execute idempotent import:
+  ```bash
+  OWNER_EMAIL="owner@lariscoffee.id" OWNER_PASSWORD="<min-10-chars>" npm run db:import-legacy
+  ```
+- Maps legacy categories, products, variants, toppings, tables, legacy QR tokens (`legacy_qr_mappings`), and verified `LUNAS` (`CASH`/`QRIS`) historical orders while explicitly reporting unsupported prototype records (`E_WALLET`, `BANK_TRANSFER`, `BELUM_DIBAYAR`) and reconciling financial totals before `COMMIT`.
