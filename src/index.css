@@ -59,4 +59,19 @@
     break-inside: avoid;
     page-break-inside: avoid;
   }
+  .receipt-print-only {
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 auto !important;
+  }
+  .receipt-thermal-58 {
+    width: 58mm !important;
+    max-width: 58mm !important;
+    font-size: 11px !important;
+  }
+  .receipt-thermal-80 {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    font-size: 12px !important;
+  }
 }

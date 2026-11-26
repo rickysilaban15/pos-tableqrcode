@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Plus,
@@ -15,23 +15,65 @@ import {
   X,
   Globe,
 } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
-import type { CafeTable } from '../../types/pos';
+import { useToast } from '../../context/ToastContext';
+import type { CafeSettings, CafeTable } from '../../types/pos';
 import { buildTableQrUrl, getQrUrlWarning, normalizeBaseUrl } from '../../utils/format';
 import { downloadCleanQrPng, downloadTableCardPng } from '../../utils/qrExport';
 import { QrCodeCanvas } from '../../components/QrCodeCanvas';
 import { ConfirmModal } from '../../components/ConfirmModal';
 
+const defaultSettings: CafeSettings = {
+  name: 'Outlet',
+  slug: 'outlet',
+  logoUrl: '',
+  description: '',
+  address: '',
+  whatsapp: '',
+  operatingHours: '',
+  isOpen: true,
+  qrBaseUrl: typeof window !== 'undefined' ? window.location.origin : '',
+  enableDineIn: true,
+  enableTakeaway: true,
+  enableTableService: true,
+  enablePickupCounter: true,
+  qrisImageUrl: '',
+};
+
 export const AdminTablesPage: React.FC = () => {
-  const {
-    state,
-    updateCafeSettings,
-    addTable,
-    updateTable,
-    deleteTable,
-    regenerateTableToken,
-    pushToast,
-  } = usePos();
+  const { pushToast } = useToast();
+  const [cafeSettings, setCafeSettings] = useState<CafeSettings>(defaultSettings);
+  const [tables, setTables] = useState<CafeTable[]>([]);
+  const [tableError, setTableError] = useState('');
+  const state = { cafeSettings, tables };
+  const loadTables = async () => {
+    const [tablesRes, settingsRes] = await Promise.all([fetch('/api/v1/tables'), fetch('/api/v1/settings')]);
+    const [data, settingsData] = await Promise.all([tablesRes.json(), settingsRes.json()]);
+    if (!tablesRes.ok) { setTableError(data?.error || 'Meja tidak dapat dimuat.'); return; }
+    setTables(data.map((table: { id: string; name: string; area: string; isActive: boolean; qrToken?: string }) => ({ ...table, token: table.qrToken ?? '', createdAt: '', updatedAt: '' })));
+    if (settingsRes.ok) {
+      setCafeSettings({ ...defaultSettings, ...settingsData, qrBaseUrl: settingsData.qrBaseUrl || window.location.origin });
+    }
+    setTableError('');
+  };
+  useEffect(() => { void loadTables(); }, []);
+  const updateCafeSettings = async (partial: Partial<CafeSettings>) => {
+    const merged = { ...cafeSettings, ...partial };
+    const response = await fetch('/api/v1/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(merged),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setTableError(data?.error || 'Base URL tidak dapat disimpan.');
+      return;
+    }
+    setCafeSettings({ ...merged, ...data, qrBaseUrl: data.qrBaseUrl || window.location.origin });
+  };
+  const addTable = async (name: string, area: string) => { const response = await fetch('/api/v1/tables', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, area }) }); const data = await response.json(); if (!response.ok) throw Error(data?.error || 'Meja tidak dapat dibuat.'); const table = { id: data.id, name: data.name, area: data.area, isActive: data.isActive, token: data.qrToken, createdAt: '', updatedAt: '' }; setTables((current) => [...current, table]); return table; };
+  const updateTable = async (id: string, value: Partial<CafeTable>) => { const response = await fetch(`/api/v1/tables/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: value.name, area: value.area, isActive: value.isActive }) }); const data = await response.json(); if (!response.ok) { setTableError(data?.error || 'Meja tidak dapat diperbarui.'); return; } setTables((current) => current.map((table) => table.id === id ? { ...table, ...data } : table)); };
+  const deleteTable = async (id: string) => { const response = await fetch(`/api/v1/tables/${id}`, { method: 'DELETE' }); if (!response.ok) { const data = await response.json(); setTableError(data?.error || 'Meja tidak dapat diarsipkan.'); return; } await loadTables(); };
+  const regenerateTableToken = async (id: string) => { const response = await fetch(`/api/v1/tables/${id}/regenerate-qr`, { method: 'POST' }); const data = await response.json(); if (!response.ok) { setTableError(data?.error || 'QR tidak dapat dibuat ulang.'); return; } setTables((current) => current.map((table) => table.id === id ? { ...table, token: data.qrToken } : table)); };
 
   const [baseUrlInput, setBaseUrlInput] = useState(state.cafeSettings.qrBaseUrl);
   const [newTableName, setNewTableName] = useState('');
@@ -77,10 +119,7 @@ export const AdminTablesPage: React.FC = () => {
       pushToast(`Meja ${clean} sudah terdaftar`, 'warning');
       return;
     }
-    const created = await addTable(clean, newTableArea);
-    setNewTableName('');
-    setPreviewTableId(created.id);
-    pushToast(`Meja ${created.name} berhasil dibuat dengan QR unik`, 'success');
+    try { const created = await addTable(clean, newTableArea); setNewTableName(''); setPreviewTableId(created.id); pushToast(`Meja ${created.name} berhasil dibuat dengan QR unik`, 'success'); } catch (error) { setTableError(error instanceof Error ? error.message : 'Meja tidak dapat dibuat.'); }
   };
 
   const handleSaveEditTable = (e: React.FormEvent) => {
@@ -138,6 +177,7 @@ export const AdminTablesPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {tableError && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{tableError}</div>}
       {/* Base URL Configuration for Real Mobile Phone Testing */}
       <section className="rounded-2xl border border-[#E8E6DF] bg-white p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -243,7 +283,8 @@ export const AdminTablesPage: React.FC = () => {
             state.cafeSettings.slug,
             table,
           );
-          const localOrderPath = `/order/${state.cafeSettings.slug}?table=${encodeURIComponent(table.name)}&token=${encodeURIComponent(table.token)}`;
+          const hasPrintableToken = Boolean(table.token);
+          const localOrderPath = `/q/${encodeURIComponent(table.token)}`;
 
           return (
             <article
@@ -287,6 +328,7 @@ export const AdminTablesPage: React.FC = () => {
 
                 {/* Real Scannable QR Preview */}
                 <div className="mt-4 flex flex-col items-center rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] p-4">
+                  {!hasPrintableToken ? <div className="py-10 text-center text-xs leading-relaxed text-[#7C4106]">QR lama masih dapat digunakan jika telah dicetak, namun tidak dapat dipreview dari hash. Pilih “Ulang QR” untuk menerbitkan kartu baru.</div> : <>
                   <button
                     type="button"
                     onClick={() => setPreviewTableId(table.id)}
@@ -303,6 +345,7 @@ export const AdminTablesPage: React.FC = () => {
                   <p className="mt-2.5 w-full truncate text-center font-mono text-[11px] text-[#64625C]">
                     {qrUrl}
                   </p>
+                  </>}
                 </div>
               </div>
 
@@ -474,7 +517,7 @@ export const AdminTablesPage: React.FC = () => {
                   <span>Halaman Cetak</span>
                 </Link>
                 <Link
-                  to={`/order/${state.cafeSettings.slug}?table=${encodeURIComponent(previewTable.name)}&token=${encodeURIComponent(previewTable.token)}`}
+                  to={`/q/${encodeURIComponent(previewTable.token)}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#FCD804] px-3.5 py-2.5 text-xs font-bold text-[#252525] hover:bg-[#E5C400]"

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Search,
@@ -13,8 +13,9 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
-import type { CartItem, Order, Product } from '../../types/pos';
+import { useToast } from '../../context/ToastContext';
+import type { CartItem, Order, PosDataState, Product } from '../../types/pos';
+import type { CreateOrderInput } from '../../context/PosContext';
 import { formatRupiah, isValidTokenFormat } from '../../utils/format';
 import { BrandMark } from '../../components/BrandMark';
 import { ProductImage } from '../../components/ProductImage';
@@ -23,25 +24,104 @@ import { CartCheckoutDrawer } from '../../components/customer/CartCheckoutDrawer
 
 const SESSION_LAST_ORDER_KEY = 'laris_pos_last_order_id';
 
+const defaultCustomerState: PosDataState = {
+  version: 1,
+  cafeSettings: {
+    name: 'Outlet',
+    slug: 'outlet',
+    logoUrl: '',
+    description: '',
+    address: '',
+    whatsapp: '',
+    operatingHours: '',
+    isOpen: true,
+    qrBaseUrl: '',
+    enableDineIn: true,
+    enableTakeaway: true,
+    enableTableService: true,
+    enablePickupCounter: true,
+    qrisImageUrl: '',
+  },
+  categories: [],
+  products: [],
+  tables: [],
+  orders: [],
+  activities: [],
+  lastOrderSequence: 0,
+};
+
 export const CustomerOrderPage: React.FC = () => {
-  const { storeSlug } = useParams<{ storeSlug: string }>();
+  const { storeSlug, token } = useParams<{ storeSlug: string; token: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { state, pushToast } = usePos();
+  const { pushToast } = useToast();
+  const [postgresState, setPostgresState] = useState<PosDataState | null>(null);
+  const [catalogError, setCatalogError] = useState('');
 
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [search, setSearch] = useState('');
-  const [cart, setCart] = useState<CartItem[]>([]);
+  const cartKey = token ? `laris-cart:${token}` : '';
+  const [cart, setCart] = useState<CartItem[]>(() => { try { return token ? JSON.parse(localStorage.getItem(`laris-cart:${token}`) || '[]') : []; } catch { return []; } });
   const [activeProduct, setActiveProduct] = useState<Product | null>(null);
   const [editingCartItem, setEditingCartItem] = useState<CartItem | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerInitialStep, setDrawerInitialStep] = useState<'cart' | 'checkout'>('cart');
 
-  const settings = state.cafeSettings;
-  const tableParam = searchParams.get('table')?.trim() || '';
-  const tokenParam = searchParams.get('token')?.trim() || '';
+  const activeState = postgresState ?? defaultCustomerState;
+  const settings = activeState.cafeSettings;
+  const tableParam = token ? (postgresState?.tables[0]?.name ?? '') : (searchParams.get('table')?.trim() || '');
+  const tokenParam = token ?? (searchParams.get('token')?.trim() || '');
   const modeParam = searchParams.get('mode')?.trim().toLowerCase() || '';
   const forceTakeawayMode = modeParam === 'takeaway';
+
+  useEffect(() => {
+    if (token) return;
+    if (!tableParam || !tokenParam) {
+      setCatalogError('QR meja tidak valid atau belum dipindai.');
+      return;
+    }
+    let live = true;
+    const qs = new URLSearchParams({
+      slug: storeSlug || '',
+      table: tableParam,
+      token: tokenParam,
+    });
+    fetch(`/api/public/legacy-qr?${qs.toString()}`)
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data?.qrToken) {
+          throw new Error(data?.error || 'QR meja legacy tidak ditemukan atau sudah tidak aktif.');
+        }
+        if (live) navigate(`/q/${encodeURIComponent(data.qrToken)}`, { replace: true });
+      })
+      .catch((error) => {
+        if (live) setCatalogError(error instanceof Error ? error.message : 'QR meja tidak valid.');
+      });
+    return () => {
+      live = false;
+    };
+  }, [token, storeSlug, tableParam, tokenParam, navigate]);
+
+  useEffect(() => {
+    if (!token) return;
+    let live = true;
+    Promise.all([fetch(`/api/public/qr/${encodeURIComponent(token)}/menu`), fetch(`/api/public/qr/${encodeURIComponent(token)}`)])
+      .then(async ([menuResponse, contextResponse]) => {
+        if (!menuResponse.ok || !contextResponse.ok) throw new Error('QR meja tidak valid atau sudah tidak aktif.');
+        const [menu, context] = await Promise.all([menuResponse.json(), contextResponse.json()]);
+        const products: Product[] = menu.products.map((product: any) => ({
+          id: product.id, categoryId: product.categoryId, name: product.name, description: product.description || '', price: product.price, image: product.image || '', isActive: true,
+          variantGroups: Object.values((product.variants || []).reduce((groups: Record<string, any>, variant: any) => { const group = groups[variant.groupName] || { id: variant.groupName, name: variant.groupName, required: variant.required, options: [] }; group.required ||= variant.required; group.options.push({ id: variant.id, label: variant.optionName, priceDelta: variant.priceDelta }); groups[variant.groupName] = group; return groups; }, {})),
+          toppings: (product.addons || []).map((addon: any) => ({ id: addon.id, name: addon.name, price: addon.price })),
+        }));
+        if (!live) return;
+        setPostgresState({ version: 1, cafeSettings: { ...defaultCustomerState.cafeSettings, ...(menu.settings || {}), name: menu.merchantName, slug: context.merchant_id }, categories: (menu.categories || []).map((category: any) => ({ ...category, isActive: true })), products, tables: [{ id: context.table_id, name: context.table_name, area: context.area || '', token, isActive: true, createdAt: '', updatedAt: '' }], orders: [], activities: [], lastOrderSequence: 0 });
+        setCatalogError('');
+      }).catch((error) => live && setCatalogError(error instanceof Error ? error.message : 'Gagal memuat menu.'));
+    return () => { live = false; };
+  }, [token]);
+
+  useEffect(() => { if (cartKey) localStorage.setItem(cartKey, JSON.stringify(cart)); }, [cart, cartKey]);
 
   // Validate table & token against authoritative server state
   const tableValidation = useMemo(() => {
@@ -52,7 +132,7 @@ export const CustomerOrderPage: React.FC = () => {
       };
     }
 
-    const matched = state.tables.find(
+    const matched = activeState.tables.find(
       (t) => t.name.toUpperCase() === tableParam.toUpperCase(),
     );
 
@@ -90,25 +170,25 @@ export const CustomerOrderPage: React.FC = () => {
       status: 'INVALID_TOKEN' as const,
       table: null,
     };
-  }, [tableParam, tokenParam, state.tables]);
+  }, [tableParam, tokenParam, activeState.tables]);
 
   const activeCategories = useMemo(
     () =>
-      [...state.categories]
+      [...activeState.categories]
         .filter((c) => c.isActive)
         .sort((a, b) => a.sortOrder - b.sortOrder),
-    [state.categories],
+    [activeState.categories],
   );
 
   const categoryNameMap = useMemo(() => {
     const map = new Map<string, string>();
-    state.categories.forEach((c) => map.set(c.id, c.name));
+    activeState.categories.forEach((c) => map.set(c.id, c.name));
     return map;
-  }, [state.categories]);
+  }, [activeState.categories]);
 
   const visibleProducts = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return state.products.filter((p) => {
+    return activeState.products.filter((p) => {
       if (!p.isActive) return false;
       if (selectedCategory !== 'ALL' && p.categoryId !== selectedCategory) return false;
       if (!q) return true;
@@ -117,7 +197,7 @@ export const CustomerOrderPage: React.FC = () => {
         p.description.toLowerCase().includes(q)
       );
     });
-  }, [state.products, selectedCategory, search]);
+  }, [activeState.products, selectedCategory, search]);
 
   const totalQty = cart.reduce((sum, item) => sum + item.quantity, 0);
   const totalAmount = cart.reduce((sum, item) => sum + item.subtotal, 0);
@@ -125,7 +205,7 @@ export const CustomerOrderPage: React.FC = () => {
   const lastOrderId =
     typeof window !== 'undefined' ? localStorage.getItem(SESSION_LAST_ORDER_KEY) : null;
   const activeTrackedOrder = lastOrderId
-    ? state.orders.find((o) => o.id === lastOrderId)
+    ? activeState.orders.find((o) => o.id === lastOrderId)
     : undefined;
 
   const handleConfirmProduct = (item: CartItem) => {
@@ -170,7 +250,7 @@ export const CustomerOrderPage: React.FC = () => {
   };
 
   const handleEditCartItem = (item: CartItem) => {
-    const product = state.products.find((p) => p.id === item.productId);
+    const product = activeState.products.find((p) => p.id === item.productId);
     if (!product) return;
     setDrawerOpen(false);
     setEditingCartItem(item);
@@ -186,6 +266,11 @@ export const CustomerOrderPage: React.FC = () => {
     setCart([]);
     setDrawerOpen(false);
 
+    if (token && (order as Order & { trackingToken?: string }).trackingToken) {
+      localStorage.removeItem(cartKey);
+      navigate(`/tracking/${(order as Order & { trackingToken: string }).trackingToken}`);
+      return;
+    }
     const query = new URLSearchParams();
     if (tableValidation.table) {
       query.set('table', tableValidation.table.name);
@@ -198,10 +283,19 @@ export const CustomerOrderPage: React.FC = () => {
     navigate(`/order-tracking/${order.id}${qs ? `?${qs}` : ''}`);
   };
 
+  const databaseCheckout = async (input: CreateOrderInput): Promise<Order> => {
+    if (!token) throw new Error('QR meja tidak tersedia.');
+    const response = await fetch(`/api/public/qr/${encodeURIComponent(token)}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerName: input.customerName, idempotencyKey: crypto.randomUUID(), paymentMethod: input.paymentMethod === 'CASHIER' ? 'CASH' : 'QRIS', orderType: input.orderType, fulfillmentMethod: input.fulfillmentMethod, items: input.items.map((item) => ({ productId: item.productId, quantity: item.quantity, variantIds: item.selectedVariants.map((variant) => variant.optionId), addonIds: item.selectedToppings.map((addon) => addon.id), notes: item.notes })) }) });
+    const payload = await response.json(); if (!response.ok) throw new Error(payload.error || 'Pesanan belum dapat dibuat.');
+    return { id: payload.id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), customerName: input.customerName, orderType: input.orderType, fulfillmentMethod: input.fulfillmentMethod, tableId: tableValidation.table?.id, tableName: tableValidation.table?.name, items: input.items, totalAmount: payload.totalAmount, paymentMethod: input.paymentMethod, paymentStatus: 'BELUM_DIBAYAR', orderStatus: 'ORDER_BARU', cashierStatus: 'AKTIF', trackingToken: payload.trackingToken } as Order & { trackingToken: string };
+  };
+
   const openCartDrawer = (initialStep: 'cart' | 'checkout' = 'cart') => {
     setDrawerInitialStep(initialStep);
     setDrawerOpen(true);
   };
+
+  if (catalogError) return <main className="min-h-screen grid place-items-center bg-[#FAF9F6] p-5 text-center"><section className="max-w-sm rounded-2xl border border-[#E8E6DF] bg-white p-6"><h1 className="font-extrabold text-[#252525]">Menu tidak tersedia</h1><p className="mt-2 text-sm text-[#64625C]">{catalogError}</p></section></main>;
 
   return (
     <div className="min-h-screen bg-[#FAF9F6] text-[#252525] pb-24 lg:pb-12">
@@ -610,6 +704,9 @@ export const CustomerOrderPage: React.FC = () => {
         onRemoveItem={handleRemoveCartItem}
         onEditItem={handleEditCartItem}
         onOrderCreated={handleOrderCreated}
+        onDatabaseCheckout={token ? databaseCheckout : undefined}
+        settingsOverride={postgresState?.cafeSettings}
+        tablesOverride={postgresState?.tables}
       />
     </div>
   );

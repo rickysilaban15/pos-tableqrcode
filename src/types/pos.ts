@@ -24,6 +24,7 @@ export interface CafeSettings {
   enableTakeaway: boolean;
   enableTableService: boolean;
   enablePickupCounter: boolean;
+  qrisImageUrl?: string;
 }
 
 export interface Category {

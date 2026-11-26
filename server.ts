@@ -5,14 +5,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
+import { ZodError } from 'zod';
 import { authRouter } from './server/modules/auth/routes.ts';
 import { productsRouter } from './server/modules/products/routes.ts';
 import { customizationsRouter } from './server/modules/products/customizations.ts';
 import { categoriesRouter } from './server/modules/categories/routes.ts';
 import { publicTablesRouter, tablesRouter } from './server/modules/tables/routes.ts';
 import { merchantOrdersRouter, publicOrdersRouter } from './server/modules/orders/routes.ts';
+import { expireAbandonedOrders } from './server/modules/orders/service.ts';
 import { paymentsRouter } from './server/modules/payments/routes.ts';
-import { databaseHealth } from './server/database/client.ts';
+import { settingsRouter } from './server/modules/settings/routes.ts';
+import { superAdminRouter } from './server/modules/superadmin/routes.ts';
+import { subscribeTenantEvents } from './server/modules/events/bus.ts';
+import { requireAuth } from './server/middleware/auth.ts';
+import { createRateLimiter } from './server/middleware/rateLimit.ts';
+import { databaseHealth, pool } from './server/database/client.ts';
 import { createSeedData } from './src/data/seedData.ts';
 import type {
   ActivityLog,
@@ -256,28 +263,40 @@ function updateAndBroadcast(nextState: PosDataState, reason: string, orderId?: s
 async function startServer() {
   const app = express();
   app.set('trust proxy', true);
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
   app.use(cookieParser());
   app.use(express.json({ limit: '2mb' }));
 
-  // Lightweight per-process protection for the public ordering surface. A shared
-  // distributed limiter belongs in the production deployment (see ARCHITECTURE.md).
-  const requestWindows = new Map<string, { count: number; startedAt: number }>();
-  app.use('/api', (req, res, next) => {
-    const key = req.ip || 'unknown';
-    const now = Date.now();
-    const windowMs = 60_000;
-    const entry = requestWindows.get(key);
-    const current = !entry || now - entry.startedAt >= windowMs
-      ? { count: 0, startedAt: now }
-      : entry;
-    current.count += 1;
-    requestWindows.set(key, current);
-    if (current.count > 120) {
-      res.status(429).json({ error: 'Terlalu banyak permintaan. Coba lagi sebentar.' });
-      return;
-    }
-    next();
+  const authRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    max: process.env.NODE_ENV === 'test' ? 200 : 25,
+    message: 'Terlalu banyak percobaan login. Coba lagi sebentar.',
   });
+  const publicOrderRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    max: process.env.NODE_ENV === 'test' ? 120 : 30,
+    message: 'Terlalu banyak pembuatan pesanan. Coba lagi sebentar.',
+  });
+  const publicReadRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    max: process.env.NODE_ENV === 'test' ? 400 : 120,
+    message: 'Terlalu banyak permintaan. Coba lagi sebentar.',
+  });
+
+  app.use('/api/auth/login', authRateLimit);
+  app.use('/api/auth/register', authRateLimit);
+  app.post('/api/public/qr/:token/orders', publicOrderRateLimit);
+  app.use('/api/public', publicReadRateLimit);
+
+  const expirationTimer = setInterval(() => {
+    void expireAbandonedOrders().catch(() => {});
+  }, 60_000);
+  expirationTimer.unref?.();
 
   // Health endpoint
   app.get('/api/health', async (_req, res) => {
@@ -294,14 +313,52 @@ async function startServer() {
   app.use('/api/public', publicOrdersRouter);
   app.use('/api/v1/orders', merchantOrdersRouter);
   app.use('/api/v1/payments', paymentsRouter);
-  // Never expose stack traces or environment details through API responses.
-  app.use('/api/auth', (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    console.error('Authentication request failed:', error);
-    res.status(500).json({ error: 'Layanan autentikasi belum tersedia. Periksa konfigurasi server.' });
+  app.use('/api/v1/settings', settingsRouter);
+  app.use('/api/super-admin', superAdminRouter);
+  app.get('/api/public/plans', async (_req, res, next) => {
+    try {
+      if (!pool) return res.json([]);
+      const rows = (
+        await pool.query(
+          'SELECT id, code, name, monthly_price "monthlyPrice", trial_days "trialDays" FROM subscription_plans WHERE is_active = true ORDER BY monthly_price ASC',
+        )
+      ).rows;
+      res.json(rows);
+    } catch (e) {
+      next(e);
+    }
   });
-  app.use('/api/v1', (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    console.error('Protected API request failed:', error);
-    res.status(500).json({ error: 'Layanan data belum tersedia. Periksa konfigurasi server.' });
+  app.get('/api/v1/events', requireAuth, (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    const unsubscribe = subscribeTenantEvents(req.auth!.merchantId, req.auth!.outletId, res);
+    req.on('close', unsubscribe);
+  });
+  // Never expose stack traces or environment details through API responses.
+  const handleApiError = (fallback: string) => (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    if (error instanceof ZodError) {
+      res.status(400).json({ error: error.issues[0]?.message || 'Data permintaan tidak valid' });
+      return;
+    }
+    const status = typeof (error as { status?: unknown })?.status === 'number' ? (error as { status: number }).status : 500;
+    if (status >= 500) {
+      console.error('API request failed:', error);
+      res.status(500).json({ error: fallback });
+      return;
+    }
+    res.status(status).json({ error: error instanceof Error ? error.message : fallback });
+  };
+  app.use('/api/auth', handleApiError('Layanan autentikasi belum tersedia. Periksa konfigurasi server.'));
+  app.use('/api/v1', handleApiError('Layanan data belum tersedia. Periksa konfigurasi server.'));
+  app.use('/api/super-admin', handleApiError('Layanan super admin belum tersedia.'));
+  app.use('/api/public', handleApiError('Layanan pemesanan tidak tersedia saat ini.'));
+
+  // Legacy JSON runtime endpoints are permanently disabled; PostgreSQL (/api/v1 & /api/public) is the sole source of truth.
+  app.use('/api/pos', (_req, res) => {
+    res.status(410).json({ error: 'Endpoint legacy /api/pos telah dinonaktifkan. Gunakan /api/v1 dan /api/public.' });
   });
 
   // Get full authoritative POS state

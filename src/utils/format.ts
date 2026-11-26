@@ -65,6 +65,9 @@ export function buildTableQrUrl(
   table: Pick<CafeTable, 'name' | 'token'>,
 ): string {
   const cleanBase = normalizeBaseUrl(baseUrl);
+  if (table.token && !table.token.startsWith('LRS-')) {
+    return `${cleanBase}/q/${encodeURIComponent(table.token)}`;
+  }
   const slug = encodeURIComponent(storeSlug || 'laris-coffee');
   const params = new URLSearchParams({
     table: table.name,

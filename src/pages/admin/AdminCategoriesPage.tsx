@@ -1,43 +1,46 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Plus, Pencil, Trash2, Check, X } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import type { Category, Product } from '../../types/pos';
 import { ConfirmModal } from '../../components/ConfirmModal';
 
 export const AdminCategoriesPage: React.FC = () => {
-  const { state, addCategory, updateCategory, deleteCategory, pushToast } = usePos();
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
   const [newName, setNewName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
-  const sortedCategories = [...state.categories].sort((a, b) => a.sortOrder - b.sortOrder);
+  const load = async () => { const [categoriesResponse, productsResponse] = await Promise.all([fetch('/api/v1/categories'), fetch('/api/v1/products')]); const [categoryData, productData] = await Promise.all([categoriesResponse.json(), productsResponse.json()]); if (!categoriesResponse.ok || !productsResponse.ok) { setError(categoryData?.error || productData?.error || 'Kategori tidak dapat dimuat.'); return; } setCategories(categoryData); setProducts(productData.map((product: Product) => ({ ...product, image: product.image || '', variantGroups: [], toppings: [] }))); setError(''); };
+  useEffect(() => { void load(); }, []);
+  const request = async (url: string, method: string, body?: unknown) => { const response = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined }); const data = response.status === 204 ? null : await response.json(); if (!response.ok) { setError(data?.error || 'Perubahan kategori tidak dapat disimpan.'); return false; } await load(); return true; };
+  const sortedCategories = [...categories].sort((a, b) => a.sortOrder - b.sortOrder);
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = newName.trim();
     if (!trimmed) return;
-    if (state.categories.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
-      pushToast('Nama kategori sudah ada', 'warning');
+    if (categories.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())) {
+      setError('Nama kategori sudah ada.');
       return;
     }
-    addCategory(trimmed);
-    setNewName('');
-    pushToast(`Kategori "${trimmed}" ditambahkan`, 'success');
+    void request('/api/v1/categories', 'POST', { name: trimmed, sortOrder: categories.length }).then((ok) => { if (ok) { setNewName(''); setNotice(`Kategori “${trimmed}” ditambahkan.`); } });
   };
 
   const handleSaveEdit = (id: string) => {
     const trimmed = editingName.trim();
     if (!trimmed) return;
-    updateCategory(id, { name: trimmed });
-    setEditingId(null);
-    setEditingName('');
-    pushToast('Kategori diperbarui', 'success');
+    void request(`/api/v1/categories/${id}`, 'PATCH', { name: trimmed }).then((ok) => { if (ok) { setEditingId(null); setEditingName(''); setNotice('Kategori diperbarui.'); } });
   };
 
-  const targetCategory = state.categories.find((c) => c.id === deleteTargetId);
+  const targetCategory = categories.find((c) => c.id === deleteTargetId);
 
   return (
     <div className="space-y-6 max-w-4xl">
+      {notice && <div role="status" className="rounded-xl border border-[#B8E1C8] bg-[#E9F5EE] px-4 py-3 text-sm text-[#15623A]">{notice}</div>}
+      {error && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{error}</div>}
       {/* Add Category Bar */}
       <form
         onSubmit={handleAdd}
@@ -86,7 +89,7 @@ export const AdminCategoriesPage: React.FC = () => {
             </thead>
             <tbody className="divide-y divide-[#E8E6DF] text-sm">
               {sortedCategories.map((cat) => {
-                const productCount = state.products.filter((p) => p.categoryId === cat.id).length;
+                const productCount = products.filter((p) => p.categoryId === cat.id).length;
                 const isEditing = editingId === cat.id;
 
                 return (
@@ -132,11 +135,7 @@ export const AdminCategoriesPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => {
-                          updateCategory(cat.id, { isActive: !cat.isActive });
-                          pushToast(
-                            `Kategori "${cat.name}" ${!cat.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
-                            'default',
-                          );
+                          void request(`/api/v1/categories/${cat.id}`, 'PATCH', { isActive: !cat.isActive }).then((ok) => { if (ok) setNotice(`Kategori “${cat.name}” ${!cat.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`); });
                         }}
                         className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
                           cat.isActive
@@ -187,8 +186,7 @@ export const AdminCategoriesPage: React.FC = () => {
         onCancel={() => setDeleteTargetId(null)}
         onConfirm={() => {
           if (deleteTargetId) {
-            deleteCategory(deleteTargetId);
-            pushToast('Kategori dihapus', 'default');
+            void request(`/api/v1/categories/${deleteTargetId}`, 'DELETE').then((ok) => { if (ok) setNotice('Kategori dinonaktifkan.'); });
           }
           setDeleteTargetId(null);
         }}

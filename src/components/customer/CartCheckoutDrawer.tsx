@@ -18,8 +18,10 @@ import {
   ShoppingBag,
   Loader2,
 } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import { useToast } from '../../context/ToastContext';
+import type { CreateOrderInput } from '../../context/PosContext';
 import type {
+  CafeSettings,
   CafeTable,
   CartItem,
   FulfillmentMethod,
@@ -44,6 +46,10 @@ interface CartCheckoutDrawerProps {
   onRemoveItem: (cartItemId: string) => void;
   onEditItem: (item: CartItem) => void;
   onOrderCreated: (order: Order) => void;
+  /** Supplies the PostgreSQL checkout while retaining this original LARIS drawer. */
+  onDatabaseCheckout?: (input: CreateOrderInput) => Promise<Order>;
+  settingsOverride?: CafeSettings;
+  tablesOverride?: CafeTable[];
 }
 
 const EWALLET_PROVIDERS = ['GoPay', 'OVO', 'DANA', 'ShopeePay'];
@@ -53,6 +59,23 @@ const BANK_PROVIDERS = [
   { name: 'BNI Virtual Account', va: '8810 0812 8890 4410' },
   { name: 'BRI Virtual Account', va: '8821 0812 8890 4410' },
 ];
+
+const fallbackSettings: CafeSettings = {
+  name: 'Outlet',
+  slug: 'outlet',
+  logoUrl: '',
+  description: '',
+  address: '',
+  whatsapp: '',
+  operatingHours: '',
+  isOpen: true,
+  qrBaseUrl: '',
+  enableDineIn: true,
+  enableTakeaway: true,
+  enableTableService: true,
+  enablePickupCounter: true,
+  qrisImageUrl: '',
+};
 
 export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   open,
@@ -65,9 +88,12 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   onRemoveItem,
   onEditItem,
   onOrderCreated,
+  onDatabaseCheckout,
+  settingsOverride,
+  tablesOverride,
 }) => {
-  const { state, createOrder, pushToast } = usePos();
-  const settings = state.cafeSettings;
+  const { pushToast } = useToast();
+  const settings = settingsOverride ?? fallbackSettings;
 
   const [step, setStep] = useState<DrawerStep>(initialStep);
   const [orderType, setOrderType] = useState<OrderType>('DINE_IN');
@@ -83,7 +109,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const activeTables: CafeTable[] = state.tables.filter((t) => t.isActive);
+  const activeTables: CafeTable[] = (tablesOverride ?? []).filter((t) => t.isActive);
   const totalAmount = cart.reduce((sum, item) => sum + item.subtotal, 0);
   const totalQty = cart.reduce((sum, item) => sum + item.quantity, 0);
 
@@ -154,6 +180,10 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
     }
   }, [orderType, fulfillmentMethod, settings.enableTableService, settings.enablePickupCounter]);
 
+  useEffect(() => {
+    if (!settings.qrisImageUrl && paymentMethod === 'QRIS') setPaymentMethod('CASHIER');
+  }, [paymentMethod, settings.qrisImageUrl]);
+
   if (!open) return null;
 
   const resolvedTable =
@@ -172,6 +202,11 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
       : paymentMethod === 'BANK_TRANSFER'
         ? bankProvider
         : undefined;
+
+  const submitOrder = async (input: CreateOrderInput) => {
+    if (!onDatabaseCheckout) throw new Error('Koneksi pemesanan tidak tersedia.');
+    return onDatabaseCheckout(input);
+  };
 
   const handleProceedToPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -193,7 +228,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
     if (paymentMethod === 'CASHIER') {
       setIsSubmitting(true);
       try {
-        const created = await createOrder({
+        const created = await submitOrder({
           customerName: customerName.trim(),
           customerWhatsapp: customerWhatsapp.trim() || undefined,
           orderNote: orderNote.trim() || undefined,
@@ -224,7 +259,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
     if (isSubmitting) return;
     setIsSubmitting(true);
     try {
-      const created = await createOrder({
+      const created = await submitOrder({
         customerName: customerName.trim(),
         customerWhatsapp: customerWhatsapp.trim() || undefined,
         orderNote: orderNote.trim() || undefined,
@@ -299,7 +334,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
               <h2 className="text-base font-extrabold text-[#252525] truncate">
                 {step === 'cart' && `Keranjang (${totalQty})`}
                 {step === 'checkout' && 'Checkout Pesanan'}
-                {step === 'payment' && 'Simulasi Pembayaran'}
+                {step === 'payment' && (onDatabaseCheckout ? 'Pembayaran QRIS' : 'Simulasi Pembayaran')}
                 {step === 'payment_failed' && 'Pembayaran Gagal'}
               </h2>
               {scannedTable && orderType === 'DINE_IN' && (
@@ -617,15 +652,17 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
               {/* Payment Method */}
               <div className="space-y-2.5">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[#64625C]">
-                  4. Metode Pembayaran (Simulasi)
+                  {onDatabaseCheckout ? '4. Metode Pembayaran' : '4. Metode Pembayaran (Simulasi)'}
                 </h3>
                 <div className="grid grid-cols-2 gap-2">
                   {[
-                    { id: 'QRIS' as const, label: 'QRIS', sub: 'Scan instan', icon: QrCode },
+                    { id: 'QRIS' as const, label: 'QRIS', sub: 'Scan QRIS merchant', icon: QrCode },
                     { id: 'E_WALLET' as const, label: 'E-Wallet', sub: 'GoPay / OVO', icon: Wallet },
                     { id: 'BANK_TRANSFER' as const, label: 'Transfer Bank', sub: 'Virtual Account', icon: Landmark },
-                    { id: 'CASHIER' as const, label: 'Bayar di Kasir', sub: 'Tunai / EDC', icon: Store },
-                  ].map((m) => {
+                    { id: 'CASHIER' as const, label: 'Bayar di Kasir', sub: 'Tunai di kasir', icon: Store },
+                  ]
+                    .filter((m) => (m.id !== 'QRIS' || Boolean(settings.qrisImageUrl)) && (!onDatabaseCheckout || m.id === 'QRIS' || m.id === 'CASHIER'))
+                    .map((m) => {
                     const Icon = m.icon;
                     const active = paymentMethod === m.id;
                     return (
@@ -750,19 +787,12 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
 
               {paymentMethod === 'QRIS' && (
                 <div className="flex flex-col items-center rounded-2xl border border-[#E8E6DF] bg-white p-5">
-                  <span className="text-xs font-bold tracking-wider text-[#1B4D3E] uppercase">
-                    QRIS Simulasi — {settings.name}
-                  </span>
+                  <span className="text-xs font-bold tracking-wider text-[#1B4D3E] uppercase">QRIS — {settings.name}</span>
                   <div className="mt-3 rounded-xl border border-[#E8E6DF] p-3 bg-white">
-                    <QrCodeCanvas
-                      value={`SIMULASI-QRIS|${settings.name}|${totalAmount}|${customerName}`}
-                      size={180}
-                      darkColor="#252525"
-                      alt="QRIS Simulasi Pembayaran"
-                    />
+                    {settings.qrisImageUrl ? <img src={settings.qrisImageUrl} alt={`QRIS ${settings.name}`} className="h-[180px] w-[180px] object-contain" /> : <QrCodeCanvas value="UNCONFIGURED" size={180} darkColor="#252525" alt="QRIS belum dikonfigurasi" />}
                   </div>
                   <p className="mt-3 text-center text-xs text-[#64625C] leading-relaxed">
-                    Kode ini hanya simulasi. Pesanan akan dibuat dengan status menunggu pembayaran sampai pembayaran terverifikasi.
+                    Scan kode QRIS statis di atas lalu klik Buat Pesanan. Pesanan menunggu verifikasi pembayaran oleh kasir sebelum diproses.
                   </p>
                 </div>
               )}
@@ -820,15 +850,17 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                   {isSubmitting ? 'Membuat Pesanan...' : 'Buat Pesanan'}
                 </span>
               </button>
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleSimulatePaymentFailed}
-                className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-2.5 text-xs font-bold text-[#A62626] hover:bg-[#FADADA] disabled:opacity-60 transition-colors"
-              >
-                <XCircle className="h-4 w-4" />
-                <span>Batalkan Simulasi Pembayaran</span>
-              </button>
+              {!onDatabaseCheckout && (
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={handleSimulatePaymentFailed}
+                  className="w-full min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-2.5 text-xs font-bold text-[#A62626] hover:bg-[#FADADA] disabled:opacity-60 transition-colors"
+                >
+                  <XCircle className="h-4 w-4" />
+                  <span>Batalkan Simulasi Pembayaran</span>
+                </button>
+              )}
             </div>
           </div>
         )}

@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, QrCode, CheckCircle2, ChefHat } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import type { ActivityLog, CafeTable, Order } from '../../types/pos';
 import {
   formatRupiah,
   formatTime,
@@ -15,30 +15,60 @@ import {
 } from '../../components/StatusBadge';
 
 export const AdminDashboardPage: React.FC = () => {
-  const { state, updateOrderStatus, pushToast } = usePos();
+  const [state, setState] = useState<{ orders: (Order & { itemCount?: number })[]; activities: ActivityLog[]; tables: CafeTable[] }>({ orders: [], activities: [], tables: [] });
+  const [revenue, setRevenue] = useState(0);
+  const [metrics, setMetrics] = useState({ totalOrders: 0, newOrders: 0, inProgressOrders: 0, readyOrders: 0 });
+  const [error, setError] = useState('');
 
-  const totalOrders = state.orders.length;
-  const newOrders = state.orders.filter((o) => o.orderStatus === 'ORDER_BARU').length;
-  const cookingOrders = state.orders.filter((o) => o.orderStatus === 'MEMASAK').length;
-  const servedOrders = state.orders.filter((o) => o.orderStatus === 'DISAJIKAN').length;
-  const simulatedRevenue = state.orders
-    .filter((o) => o.paymentStatus === 'LUNAS' || o.cashierStatus === 'SELESAI')
-    .reduce((sum, o) => sum + o.totalAmount, 0);
+  const hasConnectedOnce = useRef(false);
+  const load = useCallback(async () => {
+    const response = await fetch('/api/v1/orders/dashboard');
+    const data = await response.json();
+    if (!response.ok) { setError(data?.error || 'Dashboard tidak dapat dimuat.'); return; }
+    const orders = data.recentOrders.map((order: { id: string; customerName: string; totalAmount: number; orderStatus: string; paymentStatus: string; createdAt: string; orderType: 'DINE_IN' | 'TAKEAWAY'; fulfillmentMethod: 'TABLE_SERVICE' | 'PICKUP_COUNTER'; tableName?: string; method: 'CASH' | 'QRIS'; itemCount: number }) => ({
+      id: order.id, createdAt: order.createdAt, updatedAt: order.createdAt, customerName: order.customerName,
+      orderType: order.orderType, fulfillmentMethod: order.fulfillmentMethod, tableName: order.tableName,
+      totalAmount: order.totalAmount, paymentMethod: order.method === 'CASH' ? 'CASHIER' as const : 'QRIS' as const,
+      paymentStatus: order.paymentStatus === 'PAID' ? 'LUNAS' as const : 'BELUM_DIBAYAR' as const,
+      orderStatus: order.orderStatus === 'IN_PROGRESS' ? 'MEMASAK' as const : order.orderStatus === 'READY_TO_SERVE' ? 'DISAJIKAN' as const : 'ORDER_BARU' as const,
+      cashierStatus: order.orderStatus === 'READY_TO_SERVE' ? 'SELESAI' as const : 'AKTIF' as const,
+      items: [], itemCount: order.itemCount,
+    }));
+    setState({ orders, tables: Array.from({ length: data.tables.total }, (_, index) => ({ id: String(index), name: '', area: '', token: '', isActive: index < data.tables.active, createdAt: '', updatedAt: '' })), activities: orders.slice(0, 7).map((order: Order) => ({ id: order.id, timestamp: order.createdAt, message: `${order.customerName} · ${order.orderStatus === 'DISAJIKAN' ? 'pesanan siap disajikan' : order.orderStatus === 'MEMASAK' ? 'pesanan sedang diproses' : 'pesanan masuk'}`, orderId: order.id })) });
+    setRevenue(data.metrics.revenue); setMetrics(data.metrics); setError('');
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource('/api/v1/events');
+    const refresh = () => { void load(); };
+    es.addEventListener('connected', () => {
+      if (hasConnectedOnce.current) void load();
+      hasConnectedOnce.current = true;
+    });
+    ['order:created', 'payment:confirmed', 'order:updated', 'order:cancelled', 'order:refunded', 'order:expired'].forEach((ev) => {
+      es.addEventListener(ev, refresh);
+    });
+    return () => { es.close(); };
+  }, [load]);
+
+  const totalOrders = metrics.totalOrders;
+  const newOrders = metrics.newOrders;
+  const cookingOrders = metrics.inProgressOrders;
+  const servedOrders = metrics.readyOrders;
+  const simulatedRevenue = revenue;
 
   const recentOrders = state.orders.slice(0, 6);
 
   const handleQuickAdvance = async (orderId: string, nextStatus: 'MEMASAK' | 'DISAJIKAN') => {
-    await updateOrderStatus(orderId, nextStatus);
-    pushToast(
-      nextStatus === 'MEMASAK'
-        ? `${orderId} dipindahkan ke Memasak`
-        : `${orderId} ditandai Disajikan & Kasir Selesai`,
-      'success',
-    );
+    const response = await fetch(`/api/v1/orders/${orderId}/status`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: nextStatus === 'MEMASAK' ? 'IN_PROGRESS' : 'READY_TO_SERVE' }) });
+    if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status pesanan tidak dapat diperbarui.'); return; }
+    await load();
   };
 
   return (
     <div className="space-y-6">
+      {error && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{error}</div>}
       {/* KPI Strip — Responsive 2 -> 3 -> 5 columns */}
       <section className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 xl:grid-cols-5 sm:gap-4">
         <div className="rounded-2xl border border-[#E8E6DF] bg-white p-4 sm:p-5">
@@ -192,7 +222,7 @@ export const AdminDashboardPage: React.FC = () => {
                           </div>
                           <div className="mt-0.5 font-mono text-xs text-[#64625C] tabular-nums">
                             {formatTime(order.createdAt)} ·{' '}
-                            {order.items.reduce((s, i) => s + i.quantity, 0)} item
+                            {order.itemCount ?? order.items.reduce((s, i) => s + i.quantity, 0)} item
                           </div>
                         </td>
                         <td className="px-4 py-3.5 align-top">
@@ -241,12 +271,9 @@ export const AdminDashboardPage: React.FC = () => {
                             </button>
                           )}
                           {order.orderStatus === 'DISAJIKAN' && (
-                            <Link
-                              to={`/order-tracking/${order.id}`}
-                              className="text-xs font-semibold text-[#64625C] hover:text-[#1B4D3E] whitespace-nowrap"
-                            >
-                              Lihat Tracking
-                            </Link>
+                            <span className="text-xs font-semibold text-[#64625C] whitespace-nowrap">
+                              Pesanan selesai
+                            </span>
                           )}
                         </td>
                       </tr>

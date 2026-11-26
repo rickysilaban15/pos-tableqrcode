@@ -11,13 +11,15 @@ import {
   Smartphone,
   UtensilsCrossed,
 } from 'lucide-react';
-import { usePos } from '../context/PosContext';
+import { createSeedData } from '../data/seedData';
+import { useToast } from '../context/ToastContext';
 import { BrandMark } from '../components/BrandMark';
 import { QrCodeCanvas } from '../components/QrCodeCanvas';
 import { buildTableQrUrl, getQrUrlWarning } from '../utils/format';
 
 export const DemoPortalPage: React.FC = () => {
-  const { state, pushToast } = usePos();
+  const state = createSeedData();
+  const { pushToast } = useToast();
   const [copied, setCopied] = useState(false);
 
   const firstActiveTable =

@@ -1,8 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, Search, Pencil, Trash2, X } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
 import { PRODUCT_IMAGES } from '../../data/seedData';
-import type { Product, ToppingOption, VariantGroup } from '../../types/pos';
+import type { Category, Product, ToppingOption, VariantGroup } from '../../types/pos';
 import { formatRupiah } from '../../utils/format';
 import { ProductImage } from '../../components/ProductImage';
 import { ConfirmModal } from '../../components/ConfirmModal';
@@ -31,12 +30,25 @@ interface ProductFormState {
 }
 
 export const AdminMenuPage: React.FC = () => {
-  const { state, addProduct, updateProduct, deleteProduct, pushToast } = usePos();
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
   const [editorOpen, setEditorOpen] = useState(false);
   const [form, setForm] = useState<ProductFormState | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const state = { categories, products };
+  const load = async () => {
+    const [categoryResponse, productResponse] = await Promise.all([fetch('/api/v1/categories'), fetch('/api/v1/products')]);
+    const [categoryData, productData] = await Promise.all([categoryResponse.json(), productResponse.json()]);
+    if (!categoryResponse.ok || !productResponse.ok) { setError(categoryData?.error || productData?.error || 'Menu tidak dapat dimuat.'); return; }
+    const richProducts = await Promise.all(productData.map(async (product: { id: string; categoryId: string; name: string; description: string; price: number; imageUrl: string; isActive: boolean }) => { const response = await fetch(`/api/v1/products/${product.id}/customizations`); const customizations = response.ok ? await response.json() : { variants: [], addons: [] }; const groups = new Map<string, VariantGroup>(); customizations.variants.forEach((item: { id: string; groupName: string; optionName: string; priceDelta: number; required: boolean }) => { const group = groups.get(item.groupName) ?? { id: item.groupName, name: item.groupName, required: item.required, options: [] }; group.required = group.required || item.required; group.options.push({ id: item.id, label: item.optionName, priceDelta: item.priceDelta }); groups.set(item.groupName, group); }); return { ...product, image: product.imageUrl || '', variantGroups: [...groups.values()], toppings: customizations.addons.map((item: { id: string; name: string; price: number }) => ({ id: item.id, name: item.name, price: item.price })) } as Product; }));
+    setCategories(categoryData); setProducts(richProducts); setError('');
+  };
+  useEffect(() => { void load(); }, []);
 
   const categoryMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -95,12 +107,12 @@ export const AdminMenuPage: React.FC = () => {
     setEditorOpen(true);
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form) return;
     const trimmedName = form.name.trim();
     if (!trimmedName) {
-      pushToast('Nama produk wajib diisi', 'warning');
+      setError('Nama produk wajib diisi.');
       return;
     }
 
@@ -126,26 +138,23 @@ export const AdminMenuPage: React.FC = () => {
         price: Math.max(0, Number(t.price) || 0),
       }));
 
-    const payload: Omit<Product, 'id'> = {
+    const payload = {
       name: trimmedName,
       categoryId: form.categoryId,
       price: Math.max(0, Number(form.price) || 0),
       description: form.description.trim(),
-      image: form.image.trim(),
+      imageUrl: form.image.trim(),
       isActive: form.isActive,
-      variantGroups: cleanedVariants,
-      toppings: cleanedToppings,
+      customizations: {
+        variants: cleanedVariants.flatMap((group) => group.options.map((option) => ({ groupName: group.name, optionName: option.label, priceDelta: option.priceDelta, required: group.required }))),
+        addons: cleanedToppings.map((topping) => ({ name: topping.name, price: topping.price, isActive: true })),
+      },
     };
-
-    if (form.id) {
-      updateProduct(form.id, payload);
-      pushToast(`Produk "${trimmedName}" diperbarui`, 'success');
-    } else {
-      addProduct(payload);
-      pushToast(`Produk "${trimmedName}" ditambahkan`, 'success');
-    }
-    setEditorOpen(false);
-    setForm(null);
+    setSaving(true);
+    const response = await fetch(form.id ? `/api/v1/products/${form.id}/with-customizations` : '/api/v1/products/with-customizations', { method: form.id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = response.status === 204 ? null : await response.json(); setSaving(false);
+    if (!response.ok) { setError(result?.error || result?.message || 'Produk tidak dapat disimpan.'); return; }
+    setNotice(`Produk “${trimmedName}” ${form.id ? 'diperbarui' : 'ditambahkan'}.`); setEditorOpen(false); setForm(null); await load();
   };
 
   const addVariantGroup = () => {
@@ -206,6 +215,8 @@ export const AdminMenuPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {notice && <div role="status" className="rounded-xl border border-[#B8E1C8] bg-[#E9F5EE] px-4 py-3 text-sm text-[#15623A]">{notice}</div>}
+      {error && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{error}</div>}
       {/* Toolbar */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex flex-wrap items-center gap-2">
@@ -278,11 +289,7 @@ export const AdminMenuPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => {
-                          void updateProduct(product.id, { isActive: !product.isActive });
-                          pushToast(
-                            `${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
-                            'default',
-                          );
+                          void fetch(`/api/v1/products/${product.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ isActive: !product.isActive }) }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status produk tidak dapat disimpan.'); return; } setNotice(`${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`); await load(); });
                         }}
                         className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold ${
                           product.isActive
@@ -362,11 +369,7 @@ export const AdminMenuPage: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => {
-                            void updateProduct(product.id, { isActive: !product.isActive });
-                            pushToast(
-                              `${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
-                              'default',
-                            );
+                            void fetch(`/api/v1/products/${product.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ isActive: !product.isActive }) }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status produk tidak dapat disimpan.'); return; } setNotice(`${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`); await load(); });
                           }}
                           className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
                             product.isActive
@@ -756,9 +759,10 @@ export const AdminMenuPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={saving}
                   className="rounded-xl bg-[#1B4D3E] px-5 py-2 text-sm font-semibold text-white hover:bg-[#143B2F]"
                 >
-                  Simpan Produk
+                  {saving ? 'Menyimpan…' : 'Simpan Produk'}
                 </button>
               </div>
             </div>
@@ -775,8 +779,7 @@ export const AdminMenuPage: React.FC = () => {
         onCancel={() => setDeleteTargetId(null)}
         onConfirm={() => {
           if (deleteTargetId) {
-            deleteProduct(deleteTargetId);
-            pushToast('Produk dihapus dari menu', 'default');
+            void fetch(`/api/v1/products/${deleteTargetId}`, { method: 'DELETE' }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Produk tidak dapat diarsipkan.'); return; } setNotice('Produk diarsipkan dari menu.'); await load(); });
           }
           setDeleteTargetId(null);
         }}
