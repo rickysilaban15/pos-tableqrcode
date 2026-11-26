@@ -200,8 +200,8 @@ export const AdminLayout: React.FC = () => {
         <div className="flex h-16 items-center gap-3 border-b border-[#E8E6DF] px-5">
           <BrandMark logoUrl={brand.logoUrl} size="sm" />
           <div className="min-w-0">
-            <div className="text-sm font-extrabold tracking-tight text-[#1B4D3E] truncate">LARIS POS</div>
-            <div className="text-xs text-[#64625C] truncate">{brand.name}</div>
+            <div className="text-sm font-extrabold tracking-tight text-[#1B4D3E] truncate">{brand.name}</div>
+            <div className="text-xs text-[#64625C] truncate">Dashboard Merchant</div>
           </div>
         </div>
 
@@ -228,8 +228,8 @@ export const AdminLayout: React.FC = () => {
               <div className="flex items-center gap-2.5 min-w-0">
                 <BrandMark logoUrl={brand.logoUrl} size="sm" />
                 <div className="min-w-0">
-                  <div className="text-sm font-extrabold text-[#1B4D3E] truncate">LARIS POS</div>
-                  <div className="text-xs text-[#64625C] truncate">{brand.name}</div>
+                  <div className="text-sm font-extrabold text-[#1B4D3E] truncate">{brand.name}</div>
+                  <div className="text-xs text-[#64625C] truncate">Dashboard Merchant</div>
                 </div>
               </div>
               <button
