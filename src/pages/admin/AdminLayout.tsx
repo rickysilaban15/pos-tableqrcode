@@ -83,6 +83,13 @@ export const AdminLayout: React.FC = () => {
         const ent = await entRes.json();
         if (!ent.effectiveActive) {
           setSubBanner(`Langganan (${ent.planName}) berstatus ${ent.status}. Pesanan lunas tetap dapat diproses.`);
+        } else if (ent.status === 'TRIAL' && ent.trialEndsAt) {
+          const daysLeft = Math.ceil((new Date(ent.trialEndsAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+          if (daysLeft <= 7) {
+            setSubBanner(`Trial ${ent.planName} berakhir dalam ${daysLeft} hari. Hubungi admin untuk memperpanjang.`);
+          } else {
+            setSubBanner('');
+          }
         } else {
           setSubBanner('');
         }
