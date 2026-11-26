@@ -27,6 +27,8 @@ test.describe('Business Settings & static QRIS enforcement', () => {
     const mpB = await merchantB.newPage();
     const cp = await customer.newPage();
 
+    try {
+
     // Login Merchant A & Merchant B
     await mpA.goto('/merchant/login');
     await mpA.getByPlaceholder('Email').fill(s.merchantA.email);
@@ -187,9 +189,25 @@ test.describe('Business Settings & static QRIS enforcement', () => {
       },
     });
     expect(closedManualOrder.status()).toBe(409);
-
-    await merchantA.close();
-    await merchantB.close();
-    await customer.close();
+    } finally {
+      // Restore Merchant A default open settings so test execution order never bleeds state
+      await mpA.request
+        .put('/api/v1/settings', {
+          data: {
+            name: 'E2E A',
+            slug: 'outlet-a',
+            isOpen: true,
+            enableDineIn: true,
+            enableTakeaway: true,
+            enableTableService: true,
+            enablePickupCounter: true,
+            qrisImageUrl: '',
+          },
+        })
+        .catch(() => {});
+      await merchantA.close();
+      await merchantB.close();
+      await customer.close();
+    }
   });
 });

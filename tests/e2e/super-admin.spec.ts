@@ -136,8 +136,15 @@ test.describe('Super Admin access control and dashboard', () => {
     await page.getByLabel('Tutup').click();
     await expect(page.getByRole('heading', { name: 'Daftar Gratis 14 Hari' })).not.toBeVisible();
 
-    // 3. Demo portal still works
+    // 3. Demo portal interactive sandbox works without touching production DB
     await page.goto('/demo');
     await expect(page.getByRole('link', { name: 'LARIS POS' }).first()).toBeVisible();
+    await expect(page.getByText('Sandbox Demo Terisolasi')).toBeVisible();
+
+    // 4. Standalone operational routes enforce merchant authentication
+    await page.goto('/admin/kitchen');
+    await page.waitForURL(/\/merchant\/login/);
+    await page.goto('/admin/tables/print');
+    await page.waitForURL(/\/merchant\/login/);
   });
 });

@@ -22,7 +22,9 @@ for (const name of migrations.filter((file) => file.endsWith('.sql')).sort()) {
 const tables = ['audit_logs','payments','order_item_addons','order_items','orders','table_sessions','table_qr_codes','dining_tables','product_addons','product_variants','products','categories','merchant_memberships','subscriptions','outlets','merchants','users','plan_features','subscription_plans'];
 await client.query(`TRUNCATE ${tables.join(', ')} CASCADE`);
 const plan = (await client.query("INSERT INTO subscription_plans(code,name,monthly_price,trial_days) VALUES('basic','Basic',50000,14) RETURNING id")).rows[0];
-await client.query("INSERT INTO plan_features(plan_id,feature_key) VALUES($1,'ordering')", [plan.id]);
+const proPlan = (await client.query("INSERT INTO subscription_plans(code,name,monthly_price,trial_days) VALUES('pro','Pro',120000,14) RETURNING id")).rows[0];
+const bizPlan = (await client.query("INSERT INTO subscription_plans(code,name,monthly_price,trial_days) VALUES('business','Business',250000,14) RETURNING id")).rows[0];
+await client.query("INSERT INTO plan_features(plan_id,feature_key) VALUES($1,'ordering'),($2,'ordering'),($3,'ordering')", [plan.id, proPlan.id, bizPlan.id]);
 const suffix = crypto.randomUUID().slice(0, 8), password = crypto.randomBytes(18).toString('base64url');
 async function merchant(label: string) {
   const user = (await client.query('INSERT INTO users(email,password_hash,name) VALUES($1,$2,$3) RETURNING id,email', [`owner-${label.toLowerCase()}-${suffix}@e2e.test`, await bcrypt.hash(password, 10), `Owner ${label}`])).rows[0];
