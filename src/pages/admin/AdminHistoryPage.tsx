@@ -86,6 +86,8 @@ export const AdminHistoryPage: React.FC = () => {
   const [sourceFilter, setSourceFilter] = useState('ALL');
   const [methodFilter, setMethodFilter] = useState('ALL');
   const [search, setSearch] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
@@ -99,12 +101,16 @@ export const AdminHistoryPage: React.FC = () => {
         method: methodFilter,
       });
       if (search.trim()) orderParams.set('q', search.trim());
+      if (dateFrom) orderParams.set('dateFrom', dateFrom);
+      if (dateTo) orderParams.set('dateTo', dateTo);
 
       const payParams = new URLSearchParams({
         source: sourceFilter,
         method: methodFilter,
       });
       if (search.trim()) payParams.set('q', search.trim());
+      if (dateFrom) payParams.set('dateFrom', dateFrom);
+      if (dateTo) payParams.set('dateTo', dateTo);
 
       const [histRes, payRes] = await Promise.all([
         fetch(`/api/v1/orders/history?${orderParams.toString()}`),
@@ -123,7 +129,7 @@ export const AdminHistoryPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter, methodFilter, search]);
+  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo]);
 
   useEffect(() => {
     void load();
@@ -337,6 +343,35 @@ export const AdminHistoryPage: React.FC = () => {
                 placeholder="Cari pelanggan / ID..."
                 className="w-48 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] py-2 pl-8 pr-3 text-xs text-[#252525] focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
               />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-2 py-2 text-xs text-[#252525] focus:border-[#1B4D3E] focus:outline-none"
+                aria-label="Dari tanggal"
+                title="Dari tanggal"
+              />
+              <span className="text-xs text-[#64625C]">–</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-2 py-2 text-xs text-[#252525] focus:border-[#1B4D3E] focus:outline-none"
+                aria-label="Sampai tanggal"
+                title="Sampai tanggal"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  className="text-xs text-[#64625C] hover:text-[#A62626]"
+                  title="Hapus filter tanggal"
+                >
+                  ✕
+                </button>
+              )}
             </div>
             <button
               type="button"

@@ -270,6 +270,8 @@ merchantOrdersRouter.get('/history', async (req, res, next) => {
     const source = typeof req.query.source === 'string' ? req.query.source : 'ALL';
     const method = typeof req.query.method === 'string' ? req.query.method : 'ALL';
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const dateFrom = typeof req.query.dateFrom === 'string' ? req.query.dateFrom.trim() : '';
+    const dateTo = typeof req.query.dateTo === 'string' ? req.query.dateTo.trim() : '';
 
     const params: unknown[] = [req.auth!.merchantId, req.auth!.outletId];
     const filters: string[] = [];
@@ -288,6 +290,14 @@ merchantOrdersRouter.get('/history', async (req, res, next) => {
     if (q) {
       params.push(`%${q}%`);
       filters.push(`(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length} OR COALESCE(t.name,'') ILIKE $${params.length})`);
+    }
+    if (dateFrom) {
+      params.push(dateFrom);
+      filters.push(`o.created_at >= $${params.length}::date`);
+    }
+    if (dateTo) {
+      params.push(dateTo);
+      filters.push(`o.created_at < ($${params.length}::date + interval '1 day')`);
     }
     const whereExtra = filters.length ? ` AND ${filters.join(' AND ')}` : '';
     const [ordersResult, summaryResult] = await Promise.all([
@@ -313,8 +323,8 @@ merchantOrdersRouter.get('/history', async (req, res, next) => {
            coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND p.method = 'QRIS'), 0)::int "qrisRevenue"
          FROM orders o
          JOIN payments p ON p.order_id = o.id
-         WHERE o.merchant_id = $1 AND o.outlet_id = $2`,
-        [req.auth!.merchantId, req.auth!.outletId],
+         WHERE o.merchant_id = $1 AND o.outlet_id = $2${whereExtra}`,
+        params,
       ),
     ]);
     res.json({

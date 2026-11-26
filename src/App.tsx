@@ -23,6 +23,7 @@ const AdminSettingsPage = lazy(() => import('./pages/admin/AdminSettingsPage').t
 const AdminPosPage = lazy(() => import('./pages/admin/AdminPosPage').then((m) => ({ default: m.AdminPosPage })));
 const AdminHistoryPage = lazy(() => import('./pages/admin/AdminHistoryPage').then((m) => ({ default: m.AdminHistoryPage })));
 const AdminSubscriptionPage = lazy(() => import('./pages/admin/AdminSubscriptionPage').then((m) => ({ default: m.AdminSubscriptionPage })));
+const AdminKitchenPage = lazy(() => import('./pages/admin/AdminKitchenPage').then((m) => ({ default: m.AdminKitchenPage })));
 
 // Customer surface
 const CustomerOrderPage = lazy(() => import('./pages/customer/CustomerOrderPage').then((m) => ({ default: m.CustomerOrderPage })));
@@ -55,6 +56,7 @@ export default function App() {
             {/* Dedicated Print Routes (clean layout without sidebar) */}
             <Route path="/admin/tables/print" element={<AdminTablePrintPage />} />
             <Route path="/admin/tables/print/:tableId" element={<AdminTablePrintPage />} />
+            <Route path="/admin/kitchen" element={<AdminKitchenPage />} />
 
             {/* Admin Dashboard Routes */}
             <Route path="/admin" element={<AdminLayout />}>

@@ -15,6 +15,7 @@ import {
   LogOut,
   AlertTriangle,
   CreditCard,
+  ChefHat,
 } from 'lucide-react';
 import { BrandMark } from '../../components/BrandMark';
 
@@ -215,6 +216,16 @@ export const AdminLayout: React.FC = () => {
         {renderNavLinks()}
 
         <div className="border-t border-[#E8E6DF] p-3 space-y-1.5">
+          <a
+            href="/admin/kitchen"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-[#64625C] hover:bg-[#EEF4F1] hover:text-[#1B4D3E] transition-colors"
+          >
+            <ChefHat className="h-4 w-4 shrink-0 text-[#1B4D3E]" />
+            <span>Kitchen Display</span>
+            <ExternalLink className="h-3 w-3 ml-auto text-[#8C8980]" />
+          </a>
           <button
             type="button"
             onClick={() => void handleLogout()}
@@ -250,6 +261,16 @@ export const AdminLayout: React.FC = () => {
             </div>
             {renderNavLinks(() => setSidebarOpen(false))}
             <div className="border-t border-[#E8E6DF] p-3">
+              <a
+                href="/admin/kitchen"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex w-full items-center gap-2.5 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-[#64625C] hover:bg-[#EEF4F1] hover:text-[#1B4D3E] mb-1.5"
+              >
+                <ChefHat className="h-4 w-4 shrink-0 text-[#1B4D3E]" />
+                Kitchen Display
+                <ExternalLink className="h-3 w-3 ml-auto" />
+              </a>
               <button
                 type="button"
                 onClick={() => {
