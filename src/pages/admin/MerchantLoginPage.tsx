@@ -106,7 +106,7 @@ export function MerchantLoginPage() {
 
           <div className="mt-5 pt-5 border-t border-[#E8E6DF] text-center text-xs text-[#64625C]">
             Belum punya akun?{' '}
-            <Link to="/#pricing" className="text-[#1B4D3E] font-semibold hover:underline">
+            <Link to="/?register=1" className="text-[#1B4D3E] font-semibold hover:underline">
               Daftar gratis 14 hari
             </Link>
           </div>

@@ -35,6 +35,10 @@ export const AdminTablePrintPage: React.FC = () => {
     let active = true;
     Promise.all([fetch('/api/v1/tables'), fetch('/api/v1/settings')])
       .then(async ([tRes, sRes]) => {
+        if (tRes.status === 401 || tRes.status === 403) {
+          window.location.replace('/merchant/login');
+          return;
+        }
         const [data, sData] = await Promise.all([tRes.json(), sRes.json()]);
         if (!tRes.ok) throw Error(data?.error || 'Meja tidak dapat dimuat.');
         if (active) {

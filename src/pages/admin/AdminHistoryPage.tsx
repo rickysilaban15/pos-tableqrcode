@@ -89,6 +89,8 @@ export const AdminHistoryPage: React.FC = () => {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 50, total: 0, totalPages: 1 });
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);
 
@@ -99,6 +101,8 @@ export const AdminHistoryPage: React.FC = () => {
         status: statusFilter,
         source: sourceFilter,
         method: methodFilter,
+        page: String(page),
+        pageSize: '50',
       });
       if (search.trim()) orderParams.set('q', search.trim());
       if (dateFrom) orderParams.set('dateFrom', dateFrom);
@@ -107,6 +111,9 @@ export const AdminHistoryPage: React.FC = () => {
       const payParams = new URLSearchParams({
         source: sourceFilter,
         method: methodFilter,
+        paginated: '1',
+        page: String(page),
+        pageSize: '50',
       });
       if (search.trim()) payParams.set('q', search.trim());
       if (dateFrom) payParams.set('dateFrom', dateFrom);
@@ -121,15 +128,20 @@ export const AdminHistoryPage: React.FC = () => {
         throw new Error(histData?.error || payData?.error || 'Riwayat transaksi tidak dapat dimuat.');
       }
       setOrders(histData.orders ?? []);
+      setPagination(tab === 'orders' ? histData.pagination : payData.pagination);
       setSummary(histData.summary ?? defaultSummary);
-      setPayments(Array.isArray(payData) ? payData : []);
+      setPayments(Array.isArray(payData) ? payData : (payData.payments ?? []));
       setError('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Riwayat transaksi tidak dapat dimuat.');
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo]);
+  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo, page, tab]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo, tab]);
 
   useEffect(() => {
     void load();
@@ -150,57 +162,39 @@ export const AdminHistoryPage: React.FC = () => {
   const qrShare = Math.round((summary.qrRevenue / totalRevenueSafe) * 100);
   const posShare = summary.paidRevenue > 0 ? 100 - qrShare : 0;
 
-  const exportCsv = () => {
-    const rows = tab === 'orders' ? orders : payments;
-    if (rows.length === 0) return;
+  const formatWibDate = (d: Date) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta' }).format(d);
 
-    let csv: string;
-    if (tab === 'orders') {
-      const header = ['ID Pesanan', 'Waktu', 'Pelanggan', 'Jenis', 'Sumber', 'Meja', 'Status', 'Status Bayar', 'Metode', 'Total (Rp)', 'Tunai Diterima (Rp)', 'Kembalian (Rp)', 'Lunas Pada'];
-      const dataRows = (orders as HistoryOrder[]).map((o) => [
-        o.id,
-        o.createdAt,
-        o.customerName,
-        o.orderType === 'DINE_IN' ? 'Dine In' : 'Takeaway',
-        o.orderSource,
-        o.tableName ?? '',
-        statusLabel[o.orderStatus] ?? o.orderStatus,
-        paymentStatusLabel[o.paymentStatus] ?? o.paymentStatus,
-        o.method,
-        o.totalAmount,
-        o.cashReceived ?? '',
-        o.changeAmount ?? '',
-        o.paidAt ?? '',
-      ].map((v) => `"${String(v).replace(/"/g, '""')}"`));
-      csv = [header.map((h) => `"${h}"`), ...dataRows].map((r) => r.join(',')).join('\n');
-    } else {
-      const header = ['ID Pembayaran', 'ID Pesanan', 'Waktu', 'Pelanggan', 'Sumber', 'Status Pesanan', 'Metode', 'Status', 'Jumlah (Rp)', 'Tunai (Rp)', 'Kembalian (Rp)', 'Lunas Pada', 'Diverifikasi Oleh'];
-      const dataRows = (payments as PaymentRow[]).map((p) => [
-        p.id,
-        p.orderId,
-        p.createdAt,
-        p.customerName,
-        p.orderSource,
-        p.orderStatus,
-        p.method,
-        p.status,
-        p.amount,
-        p.cashReceived ?? '',
-        p.changeAmount ?? '',
-        p.paidAt ?? '',
-        p.verifiedByName ?? '',
-      ].map((v) => `"${String(v).replace(/"/g, '""')}"`));
-      csv = [header.map((h) => `"${h}"`), ...dataRows].map((r) => r.join(',')).join('\n');
+  const applyDatePreset = (preset: 'today' | '7d' | 'month' | 'all') => {
+    if (preset === 'all') {
+      setDateFrom('');
+      setDateTo('');
+      return;
     }
+    const now = new Date();
+    const todayWib = formatWibDate(now);
+    if (preset === 'today') {
+      setDateFrom(todayWib);
+      setDateTo(todayWib);
+    } else if (preset === '7d') {
+      const weekAgo = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+      setDateFrom(formatWibDate(weekAgo));
+      setDateTo(todayWib);
+    } else if (preset === 'month') {
+      setDateFrom(`${todayWib.slice(0, 8)}01`);
+      setDateTo(todayWib);
+    }
+  };
 
-    const bom = '\uFEFF'; // UTF-8 BOM for Excel compatibility
-    const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `transaksi-${tab}-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const exportCsv = () => {
+    const params = new URLSearchParams({ source: sourceFilter, method: methodFilter });
+    if (tab === 'orders') params.set('status', statusFilter);
+    if (search.trim()) params.set('q', search.trim());
+    if (dateFrom) params.set('dateFrom', dateFrom);
+    if (dateTo) params.set('dateTo', dateTo);
+    // Server-side export is complete (no 200-row cap), WIB-formatted and formula-injection safe.
+    const path = tab === 'orders' ? '/api/v1/orders/history/export.csv' : '/api/v1/payments/export.csv';
+    window.location.assign(`${path}?${params.toString()}`);
   };
 
   return (
@@ -286,7 +280,7 @@ export const AdminHistoryPage: React.FC = () => {
                 tab === 'orders' ? 'bg-[#1B4D3E] text-white' : 'text-[#64625C] hover:text-[#252525]'
               }`}
             >
-              Riwayat Pesanan ({orders.length})
+              Riwayat Pesanan
             </button>
             <button
               type="button"
@@ -295,7 +289,7 @@ export const AdminHistoryPage: React.FC = () => {
                 tab === 'payments' ? 'bg-[#1B4D3E] text-white' : 'text-[#64625C] hover:text-[#252525]'
               }`}
             >
-              Riwayat Pembayaran ({payments.length})
+              Riwayat Pembayaran
             </button>
           </div>
 
@@ -344,7 +338,30 @@ export const AdminHistoryPage: React.FC = () => {
                 className="w-48 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] py-2 pl-8 pr-3 text-xs text-[#252525] focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
               />
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <div className="inline-flex rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] p-0.5 text-[11px] font-semibold">
+                <button
+                  type="button"
+                  onClick={() => applyDatePreset('today')}
+                  className="rounded-lg px-2 py-1 text-[#5C5952] hover:bg-white hover:text-[#1B4D3E]"
+                >
+                  Hari Ini
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyDatePreset('7d')}
+                  className="rounded-lg px-2 py-1 text-[#5C5952] hover:bg-white hover:text-[#1B4D3E]"
+                >
+                  7 Hari
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyDatePreset('month')}
+                  className="rounded-lg px-2 py-1 text-[#5C5952] hover:bg-white hover:text-[#1B4D3E]"
+                >
+                  Bulan Ini
+                </button>
+              </div>
               <input
                 type="date"
                 value={dateFrom}
@@ -365,7 +382,7 @@ export const AdminHistoryPage: React.FC = () => {
               {(dateFrom || dateTo) && (
                 <button
                   type="button"
-                  onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  onClick={() => applyDatePreset('all')}
                   className="text-xs text-[#64625C] hover:text-[#A62626]"
                   title="Hapus filter tanggal"
                 >
@@ -526,6 +543,16 @@ export const AdminHistoryPage: React.FC = () => {
           </div>
         )}
       </section>
+
+      {pagination.totalPages > 1 && (
+        <nav aria-label="Paginasi riwayat" className="flex items-center justify-between rounded-2xl border border-[#E8E6DF] bg-white px-4 py-3 text-xs">
+          <span className="text-[#5C5952]">{pagination.total.toLocaleString('id-ID')} data · Halaman {pagination.page} dari {pagination.totalPages}</span>
+          <div className="flex gap-2">
+            <button type="button" disabled={page <= 1 || loading} onClick={() => setPage((p) => Math.max(1, p - 1))} className="rounded-lg border border-[#E8E6DF] px-3 py-1.5 font-semibold disabled:opacity-40">Sebelumnya</button>
+            <button type="button" disabled={page >= pagination.totalPages || loading} onClick={() => setPage((p) => p + 1)} className="rounded-lg border border-[#E8E6DF] px-3 py-1.5 font-semibold disabled:opacity-40">Berikutnya</button>
+          </div>
+        </nav>
+      )}
 
       <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />
     </div>

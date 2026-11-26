@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Search,
   Store,
@@ -57,6 +57,14 @@ function MerchantDetailPanel({
     notes: '',
   });
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [saving, onClose]);
 
   const save = async () => {
     setSaving(true);
@@ -193,21 +201,33 @@ function MerchantDetailPanel({
           {/* Feature toggles */}
           <div className="grid grid-cols-2 gap-3">
             <label className={`flex items-center gap-3 rounded-xl border p-3 cursor-pointer transition-colors ${form.qrOrderingEnabled ? 'border-emerald-500/30 bg-emerald-500/10' : 'border-white/8 bg-white/5'}`}>
+              <input
+                type="checkbox"
+                checked={form.qrOrderingEnabled}
+                onChange={(e) => setForm((f) => ({ ...f, qrOrderingEnabled: e.target.checked }))}
+                className="sr-only"
+              />
               <QrCode className={`h-5 w-5 shrink-0 ${form.qrOrderingEnabled ? 'text-emerald-400' : 'text-white/30'}`} />
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-white">QR Ordering</p>
               </div>
-              <div className={`w-9 h-5 rounded-full transition-colors relative ${form.qrOrderingEnabled ? 'bg-emerald-500' : 'bg-white/15'}`} onClick={() => setForm((f) => ({ ...f, qrOrderingEnabled: !f.qrOrderingEnabled }))}>
+              <div className={`w-9 h-5 rounded-full transition-colors relative ${form.qrOrderingEnabled ? 'bg-emerald-500' : 'bg-white/15'}`}>
                 <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${form.qrOrderingEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </div>
             </label>
 
             <label className={`flex items-center gap-3 rounded-xl border p-3 cursor-pointer transition-colors ${form.posEnabled ? 'border-blue-500/30 bg-blue-500/10' : 'border-white/8 bg-white/5'}`}>
+              <input
+                type="checkbox"
+                checked={form.posEnabled}
+                onChange={(e) => setForm((f) => ({ ...f, posEnabled: e.target.checked }))}
+                className="sr-only"
+              />
               <Calculator className={`h-5 w-5 shrink-0 ${form.posEnabled ? 'text-blue-400' : 'text-white/30'}`} />
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-semibold text-white">Manual POS</p>
               </div>
-              <div className={`w-9 h-5 rounded-full transition-colors relative ${form.posEnabled ? 'bg-blue-500' : 'bg-white/15'}`} onClick={() => setForm((f) => ({ ...f, posEnabled: !f.posEnabled }))}>
+              <div className={`w-9 h-5 rounded-full transition-colors relative ${form.posEnabled ? 'bg-blue-500' : 'bg-white/15'}`}>
                 <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${form.posEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
               </div>
             </label>
@@ -325,11 +345,11 @@ export const SuperAdminMerchantsPage: React.FC = () => {
             className="w-full rounded-xl bg-white/8 border border-white/10 pl-9 pr-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-2 focus:ring-[#FCD804]/30"
           />
         </div>
-        <div className="relative">
+        <div className="relative w-full sm:w-auto">
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
-            className="appearance-none rounded-xl bg-white/8 border border-white/10 pl-3 pr-8 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#FCD804]/30"
+            className="w-full sm:w-auto appearance-none rounded-xl bg-white/8 border border-white/10 pl-3 pr-8 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#FCD804]/30"
           >
             {STATUS_OPTIONS.map((o) => (
               <option key={o.value} value={o.value} className="bg-[#0D2B22]">{o.label}</option>

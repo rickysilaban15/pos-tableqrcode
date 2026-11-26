@@ -42,13 +42,68 @@ export const AdminMenuPage: React.FC = () => {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const state = { categories, products };
   const load = async () => {
-    const [categoryResponse, productResponse] = await Promise.all([fetch('/api/v1/categories'), fetch('/api/v1/products')]);
+    const [categoryResponse, productResponse] = await Promise.all([
+      fetch('/api/v1/categories'),
+      fetch('/api/v1/products?includeCustomizations=1'),
+    ]);
     const [categoryData, productData] = await Promise.all([categoryResponse.json(), productResponse.json()]);
-    if (!categoryResponse.ok || !productResponse.ok) { setError(categoryData?.error || productData?.error || 'Menu tidak dapat dimuat.'); return; }
-    const richProducts = await Promise.all(productData.map(async (product: { id: string; categoryId: string; name: string; description: string; price: number; imageUrl: string; isActive: boolean }) => { const response = await fetch(`/api/v1/products/${product.id}/customizations`); const customizations = response.ok ? await response.json() : { variants: [], addons: [] }; const groups = new Map<string, VariantGroup>(); customizations.variants.forEach((item: { id: string; groupName: string; optionName: string; priceDelta: number; required: boolean }) => { const group = groups.get(item.groupName) ?? { id: item.groupName, name: item.groupName, required: item.required, options: [] }; group.required = group.required || item.required; group.options.push({ id: item.id, label: item.optionName, priceDelta: item.priceDelta }); groups.set(item.groupName, group); }); return { ...product, image: product.imageUrl || '', variantGroups: [...groups.values()], toppings: customizations.addons.map((item: { id: string; name: string; price: number }) => ({ id: item.id, name: item.name, price: item.price })) } as Product; }));
-    setCategories(categoryData); setProducts(richProducts); setError('');
+    if (!categoryResponse.ok || !productResponse.ok) {
+      setError(categoryData?.error || productData?.error || 'Menu tidak dapat dimuat.');
+      return;
+    }
+    const richProducts = productData.map(
+      (product: {
+        id: string;
+        categoryId: string;
+        name: string;
+        description: string;
+        price: number;
+        imageUrl: string;
+        isActive: boolean;
+        customizations?: {
+          variants: { id: string; groupName: string; optionName: string; priceDelta: number; required: boolean }[];
+          addons: { id: string; name: string; price: number }[];
+        };
+      }) => {
+        const customizations = product.customizations ?? { variants: [], addons: [] };
+        const groups = new Map<string, VariantGroup>();
+        customizations.variants.forEach((item) => {
+          const group = groups.get(item.groupName) ?? {
+            id: item.groupName,
+            name: item.groupName,
+            required: item.required,
+            options: [],
+          };
+          group.required = group.required || item.required;
+          group.options.push({ id: item.id, label: item.optionName, priceDelta: item.priceDelta });
+          groups.set(item.groupName, group);
+        });
+        return {
+          ...product,
+          image: product.imageUrl || '',
+          variantGroups: [...groups.values()],
+          toppings: customizations.addons.map((item) => ({ id: item.id, name: item.name, price: item.price })),
+        } as Product;
+      },
+    );
+    setCategories(categoryData);
+    setProducts(richProducts);
+    setError('');
   };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+  }, []);
+  useEffect(() => {
+    if (!editorOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) {
+        setEditorOpen(false);
+        setForm(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editorOpen, saving]);
 
   const categoryMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -263,7 +318,7 @@ export const AdminMenuPage: React.FC = () => {
           </div>
         ) : (
           <>
-            <div className="md:hidden divide-y divide-[#E8E6DF]">
+            <div className="lg:hidden divide-y divide-[#E8E6DF]">
               {filteredProducts.map((product) => (
                 <div key={product.id} className="p-4 flex gap-3.5">
                   <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-[#E8E6DF] bg-[#FAF9F6]">
@@ -324,27 +379,27 @@ export const AdminMenuPage: React.FC = () => {
               ))}
             </div>
 
-            <div className="hidden md:block overflow-x-auto">
+            <div className="hidden lg:block overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-[#E8E6DF] bg-[#FAF9F6] text-xs font-semibold text-[#64625C]">
-                    <th className="px-6 py-3.5">Produk</th>
-                    <th className="px-4 py-3.5">Kategori</th>
-                    <th className="px-4 py-3.5 text-right">Harga Nett</th>
-                    <th className="px-4 py-3.5">Kustomisasi</th>
-                    <th className="px-4 py-3.5">Status</th>
-                    <th className="px-6 py-3.5 text-right">Aksi</th>
+                    <th className="px-4 lg:px-5 py-3.5">Produk</th>
+                    <th className="px-3 py-3.5">Kategori</th>
+                    <th className="px-3 py-3.5 text-right">Harga Nett</th>
+                    <th className="px-3 py-3.5">Kustomisasi</th>
+                    <th className="px-3 py-3.5">Status</th>
+                    <th className="px-4 lg:px-5 py-3.5 text-right">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E8E6DF] text-sm">
                   {filteredProducts.map((product) => (
                     <tr key={product.id} className="hover:bg-[#FAF9F6]/70 transition-colors">
-                      <td className="px-6 py-3.5">
-                        <div className="flex items-center gap-3.5">
-                          <div className="h-12 w-16 shrink-0 overflow-hidden rounded-lg border border-[#E8E6DF] bg-[#FAF9F6]">
+                      <td className="px-4 lg:px-5 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className="h-11 w-14 shrink-0 overflow-hidden rounded-lg border border-[#E8E6DF] bg-[#FAF9F6]">
                             <ProductImage src={product.image} alt={product.name} />
                           </div>
-                          <div className="min-w-0 max-w-xs">
+                          <div className="min-w-0 max-w-[200px] lg:max-w-xs">
                             <div className="font-semibold text-[#252525] truncate">
                               {product.name}
                             </div>
@@ -354,18 +409,18 @@ export const AdminMenuPage: React.FC = () => {
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3.5 text-xs font-medium text-[#64625C] whitespace-nowrap">
+                      <td className="px-3 py-3.5 text-xs font-medium text-[#64625C] whitespace-nowrap">
                         {categoryMap.get(product.categoryId) ?? 'Lainnya'}
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono text-sm font-semibold text-[#252525] tabular-nums whitespace-nowrap">
+                      <td className="px-3 py-3.5 text-right font-mono text-sm font-semibold text-[#252525] tabular-nums whitespace-nowrap">
                         {formatRupiah(product.price)}
                       </td>
-                      <td className="px-4 py-3.5 text-xs text-[#64625C] whitespace-nowrap">
-                        <span>{product.variantGroups.length} grup varian</span>
-                        <span className="mx-1.5" aria-hidden="true">·</span>
+                      <td className="px-3 py-3.5 text-xs text-[#64625C] whitespace-nowrap">
+                        <span>{product.variantGroups.length} varian</span>
+                        <span className="mx-1" aria-hidden="true">·</span>
                         <span>{product.toppings.length} topping</span>
                       </td>
-                      <td className="px-4 py-3.5">
+                      <td className="px-3 py-3.5">
                         <button
                           type="button"
                           onClick={() => {
@@ -380,7 +435,7 @@ export const AdminMenuPage: React.FC = () => {
                           {product.isActive ? 'Aktif' : 'Nonaktif'}
                         </button>
                       </td>
-                      <td className="px-6 py-3.5 text-right whitespace-nowrap">
+                      <td className="px-4 lg:px-5 py-3.5 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
@@ -501,7 +556,7 @@ export const AdminMenuPage: React.FC = () => {
 
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-semibold text-[#252525]">
-                    Foto Produk (Pilih Galeri Studio atau URL)
+                    Foto Produk (Pilih Galeri Studio, Unggah File, atau URL)
                   </label>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {PRESET_IMAGE_OPTIONS.map((preset) => (
@@ -519,13 +574,38 @@ export const AdminMenuPage: React.FC = () => {
                       </button>
                     ))}
                   </div>
-                  <input
-                    type="text"
-                    value={form.image}
-                    onChange={(e) => setForm({ ...form, image: e.target.value })}
-                    placeholder="/src/assets/images/... atau https://..."
-                    className="mt-2 w-full rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 font-mono text-xs focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
-                  />
+                  <div className="mt-2 flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={form.image}
+                      onChange={(e) => setForm({ ...form, image: e.target.value })}
+                      placeholder="/src/assets/images/... atau https://..."
+                      className="flex-1 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 font-mono text-xs focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
+                    />
+                    <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-2 text-xs font-semibold text-[#1B4D3E] hover:bg-white whitespace-nowrap">
+                      <span>Unggah Foto</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          if (file.size > 1_200_000) {
+                            setError('Ukuran foto maksimal 1.2 MB.');
+                            return;
+                          }
+                          const reader = new FileReader();
+                          reader.onload = () => {
+                            if (typeof reader.result === 'string') {
+                              setForm((prev) => (prev ? { ...prev, image: reader.result as string } : prev));
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }}
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
 

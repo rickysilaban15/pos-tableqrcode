@@ -35,6 +35,10 @@ export const AdminKitchenPage: React.FC = () => {
   const load = useCallback(async () => {
     try {
       const r = await fetch('/api/v1/orders');
+      if (r.status === 401 || r.status === 403) {
+        window.location.replace('/merchant/login');
+        return;
+      }
       if (!r.ok) throw new Error('Gagal memuat antrian dapur');
       const data: KitchenOrder[] = await r.json();
       setOrders(data.filter((o) => o.orderStatus === 'NEW_ORDER' || o.orderStatus === 'IN_PROGRESS'));

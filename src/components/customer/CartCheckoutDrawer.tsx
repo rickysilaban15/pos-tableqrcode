@@ -109,6 +109,15 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSubmitting) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, isSubmitting, onClose]);
+
   const activeTables: CafeTable[] = (tablesOverride ?? []).filter((t) => t.isActive);
   const totalAmount = cart.reduce((sum, item) => sum + item.subtotal, 0);
   const totalQty = cart.reduce((sum, item) => sum + item.quantity, 0);
@@ -242,7 +251,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
           paymentMethod: 'CASHIER',
           paymentStatus: 'BELUM_DIBAYAR',
         });
-        pushToast(`Pesanan ${created.id} terkirim ke dapur (Bayar di Kasir)`, 'success');
+        pushToast('Pesanan dibuat. Tunjukkan nomor pesanan untuk bayar di kasir.', 'success');
         onOrderCreated(created);
       } catch (err) {
         setFormError(err instanceof Error ? err.message : 'Pesanan belum dapat dikirim. Coba lagi.');
@@ -306,8 +315,13 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
       className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
+      aria-label="Keranjang dan checkout pesanan"
+      onClick={() => !isSubmitting && onClose()}
     >
-      <div className="w-full sm:max-w-[440px] h-[94dvh] sm:h-full flex flex-col rounded-t-3xl sm:rounded-none bg-white shadow-2xl overflow-hidden">
+      <div
+        className="w-full sm:max-w-[440px] h-[94dvh] sm:h-full flex flex-col rounded-t-3xl sm:rounded-none bg-white shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Mobile drag handle */}
         <div className="sm:hidden flex justify-center pt-2.5 pb-0.5 bg-white">
           <div className="h-1.5 w-10 rounded-full bg-[#D9D6CD]" />

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Search,
@@ -21,8 +21,6 @@ import { BrandMark } from '../../components/BrandMark';
 import { ProductImage } from '../../components/ProductImage';
 import { ProductDetailModal } from '../../components/customer/ProductDetailModal';
 import { CartCheckoutDrawer } from '../../components/customer/CartCheckoutDrawer';
-
-const SESSION_LAST_ORDER_KEY = 'laris_pos_last_order_id';
 
 const defaultCustomerState: PosDataState = {
   version: 1,
@@ -56,16 +54,33 @@ export const CustomerOrderPage: React.FC = () => {
   const navigate = useNavigate();
   const { pushToast } = useToast();
   const [postgresState, setPostgresState] = useState<PosDataState | null>(null);
+  const [loadingCatalog, setLoadingCatalog] = useState<boolean>(true);
   const [catalogError, setCatalogError] = useState('');
+  const [entitlementInactive, setEntitlementInactive] = useState(false);
 
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [search, setSearch] = useState('');
   const cartKey = token ? `laris-cart:${token}` : '';
-  const [cart, setCart] = useState<CartItem[]>(() => { try { return token ? JSON.parse(localStorage.getItem(`laris-cart:${token}`) || '[]') : []; } catch { return []; } });
+  const trackingStorageKey = token ? `laris-last-tracking:${token}` : '';
+  const [lastTrackingToken, setLastTrackingToken] = useState<string>(() => {
+    try {
+      return token ? localStorage.getItem(`laris-last-tracking:${token}`) || '' : '';
+    } catch {
+      return '';
+    }
+  });
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    try {
+      return token ? JSON.parse(localStorage.getItem(`laris-cart:${token}`) || '[]') : [];
+    } catch {
+      return [];
+    }
+  });
   const [activeProduct, setActiveProduct] = useState<Product | null>(null);
   const [editingCartItem, setEditingCartItem] = useState<CartItem | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerInitialStep, setDrawerInitialStep] = useState<'cart' | 'checkout'>('cart');
+  const idempotencyKeyRef = useRef<{ signature: string; key: string } | null>(null);
 
   const activeState = postgresState ?? defaultCustomerState;
   const settings = activeState.cafeSettings;
@@ -77,10 +92,12 @@ export const CustomerOrderPage: React.FC = () => {
   useEffect(() => {
     if (token) return;
     if (!tableParam || !tokenParam) {
+      setLoadingCatalog(false);
       setCatalogError('QR meja tidak valid atau belum dipindai.');
       return;
     }
     let live = true;
+    setLoadingCatalog(true);
     const qs = new URLSearchParams({
       slug: storeSlug || '',
       table: tableParam,
@@ -95,7 +112,10 @@ export const CustomerOrderPage: React.FC = () => {
         if (live) navigate(`/q/${encodeURIComponent(data.qrToken)}`, { replace: true });
       })
       .catch((error) => {
-        if (live) setCatalogError(error instanceof Error ? error.message : 'QR meja tidak valid.');
+        if (live) {
+          setLoadingCatalog(false);
+          setCatalogError(error instanceof Error ? error.message : 'QR meja tidak valid.');
+        }
       });
     return () => {
       live = false;
@@ -105,78 +125,125 @@ export const CustomerOrderPage: React.FC = () => {
   useEffect(() => {
     if (!token) return;
     let live = true;
-    Promise.all([fetch(`/api/public/qr/${encodeURIComponent(token)}/menu`), fetch(`/api/public/qr/${encodeURIComponent(token)}`)])
+    setLoadingCatalog(true);
+    Promise.all([
+      fetch(`/api/public/qr/${encodeURIComponent(token)}/menu`),
+      fetch(`/api/public/qr/${encodeURIComponent(token)}`),
+    ])
       .then(async ([menuResponse, contextResponse]) => {
-        if (!menuResponse.ok || !contextResponse.ok) throw new Error('QR meja tidak valid atau sudah tidak aktif.');
+        if (!menuResponse.ok || !contextResponse.ok) {
+          throw new Error('QR meja tidak valid atau sudah tidak aktif.');
+        }
         const [menu, context] = await Promise.all([menuResponse.json(), contextResponse.json()]);
-        const products: Product[] = menu.products.map((product: any) => ({
-          id: product.id, categoryId: product.categoryId, name: product.name, description: product.description || '', price: product.price, image: product.image || '', isActive: true,
-          variantGroups: Object.values((product.variants || []).reduce((groups: Record<string, any>, variant: any) => { const group = groups[variant.groupName] || { id: variant.groupName, name: variant.groupName, required: variant.required, options: [] }; group.required ||= variant.required; group.options.push({ id: variant.id, label: variant.optionName, priceDelta: variant.priceDelta }); groups[variant.groupName] = group; return groups; }, {})),
-          toppings: (product.addons || []).map((addon: any) => ({ id: addon.id, name: addon.name, price: addon.price })),
+        const products: Product[] = (menu.products || []).map((product: any) => ({
+          id: product.id,
+          categoryId: product.categoryId,
+          name: product.name,
+          description: product.description || '',
+          price: product.price,
+          image: product.image || '',
+          isActive: true,
+          variantGroups: Object.values(
+            (product.variants || []).reduce((groups: Record<string, any>, variant: any) => {
+              const group = groups[variant.groupName] || {
+                id: variant.groupName,
+                name: variant.groupName,
+                required: variant.required,
+                options: [],
+              };
+              group.required ||= variant.required;
+              group.options.push({
+                id: variant.id,
+                label: variant.optionName,
+                priceDelta: variant.priceDelta,
+              });
+              groups[variant.groupName] = group;
+              return groups;
+            }, {}),
+          ),
+          toppings: (product.addons || []).map((addon: any) => ({
+            id: addon.id,
+            name: addon.name,
+            price: addon.price,
+          })),
         }));
         if (!live) return;
-        setPostgresState({ version: 1, cafeSettings: { ...defaultCustomerState.cafeSettings, ...(menu.settings || {}), name: menu.merchantName, slug: context.merchant_id }, categories: (menu.categories || []).map((category: any) => ({ ...category, isActive: true })), products, tables: [{ id: context.table_id, name: context.table_name, area: context.area || '', token, isActive: true, createdAt: '', updatedAt: '' }], orders: [], activities: [], lastOrderSequence: 0 });
+        const entOk = Boolean(menu.entitlements?.active && menu.entitlements?.qrOrderingEnabled);
+        setEntitlementInactive(!entOk);
+        setPostgresState({
+          version: 1,
+          cafeSettings: {
+            ...defaultCustomerState.cafeSettings,
+            ...(menu.settings || {}),
+            name: menu.merchantName,
+            slug: context.merchant_id,
+          },
+          categories: (menu.categories || []).map((category: any) => ({ ...category, isActive: true })),
+          products,
+          tables: [
+            {
+              id: context.table_id,
+              name: context.table_name,
+              area: context.area || '',
+              token,
+              isActive: true,
+              createdAt: '',
+              updatedAt: '',
+            },
+          ],
+          orders: [],
+          activities: [],
+          lastOrderSequence: 0,
+        });
         setCatalogError('');
-      }).catch((error) => live && setCatalogError(error instanceof Error ? error.message : 'Gagal memuat menu.'));
-    return () => { live = false; };
+        setLoadingCatalog(false);
+      })
+      .catch((error) => {
+        if (live) {
+          setCatalogError(error instanceof Error ? error.message : 'Gagal memuat menu.');
+          setLoadingCatalog(false);
+        }
+      });
+    return () => {
+      live = false;
+    };
   }, [token]);
 
-  useEffect(() => { if (cartKey) localStorage.setItem(cartKey, JSON.stringify(cart)); }, [cart, cartKey]);
+  useEffect(() => {
+    if (cartKey) {
+      try {
+        localStorage.setItem(cartKey, JSON.stringify(cart));
+      } catch {
+        // Ignore storage quota errors
+      }
+    }
+  }, [cart, cartKey]);
 
-  // Validate table & token against authoritative server state
   const tableValidation = useMemo(() => {
     if (!tableParam) {
-      return {
-        status: 'NO_TABLE' as const,
-        table: null,
-      };
+      return { status: 'NO_TABLE' as const, table: null };
     }
-
-    const matched = activeState.tables.find(
-      (t) => t.name.toUpperCase() === tableParam.toUpperCase(),
-    );
-
+    const matched = activeState.tables.find((t) => t.name.toUpperCase() === tableParam.toUpperCase());
     if (matched) {
       if (!matched.isActive) {
-        return {
-          status: 'INACTIVE_TABLE' as const,
-          table: null,
-        };
+        return { status: 'INACTIVE_TABLE' as const, table: null };
       }
       if (!tokenParam || matched.token.toUpperCase() === tokenParam.toUpperCase()) {
-        return {
-          status: 'VALID' as const,
-          table: { id: matched.id, name: matched.name, area: matched.area },
-        };
+        return { status: 'VALID' as const, table: { id: matched.id, name: matched.name, area: matched.area } };
       }
-      return {
-        status: 'INVALID_TOKEN' as const,
-        table: null,
-      };
+      return { status: 'INVALID_TOKEN' as const, table: null };
     }
-
     if (tokenParam && isValidTokenFormat(tokenParam)) {
       return {
         status: 'VALID' as const,
-        table: {
-          id: `qr-${tableParam.toUpperCase()}`,
-          name: tableParam.toUpperCase(),
-          area: 'QR Meja',
-        },
+        table: { id: `qr-${tableParam.toUpperCase()}`, name: tableParam.toUpperCase(), area: 'QR Meja' },
       };
     }
-
-    return {
-      status: 'INVALID_TOKEN' as const,
-      table: null,
-    };
+    return { status: 'INVALID_TOKEN' as const, table: null };
   }, [tableParam, tokenParam, activeState.tables]);
 
   const activeCategories = useMemo(
-    () =>
-      [...activeState.categories]
-        .filter((c) => c.isActive)
-        .sort((a, b) => a.sortOrder - b.sortOrder),
+    () => [...activeState.categories].filter((c) => c.isActive).sort((a, b) => a.sortOrder - b.sortOrder),
     [activeState.categories],
   );
 
@@ -192,21 +259,12 @@ export const CustomerOrderPage: React.FC = () => {
       if (!p.isActive) return false;
       if (selectedCategory !== 'ALL' && p.categoryId !== selectedCategory) return false;
       if (!q) return true;
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q)
-      );
+      return p.name.toLowerCase().includes(q) || p.description.toLowerCase().includes(q);
     });
   }, [activeState.products, selectedCategory, search]);
 
   const totalQty = cart.reduce((sum, item) => sum + item.quantity, 0);
   const totalAmount = cart.reduce((sum, item) => sum + item.subtotal, 0);
-
-  const lastOrderId =
-    typeof window !== 'undefined' ? localStorage.getItem(SESSION_LAST_ORDER_KEY) : null;
-  const activeTrackedOrder = lastOrderId
-    ? activeState.orders.find((o) => o.id === lastOrderId)
-    : undefined;
 
   const handleConfirmProduct = (item: CartItem) => {
     setCart((prev) => {
@@ -218,10 +276,9 @@ export const CustomerOrderPage: React.FC = () => {
       }
       return [...prev, item];
     });
+    idempotencyKeyRef.current = null;
     pushToast(
-      editingCartItem
-        ? `${item.productName} di keranjang diperbarui`
-        : `${item.productName} ditambahkan ke keranjang`,
+      editingCartItem ? `${item.productName} di keranjang diperbarui` : `${item.productName} ditambahkan ke keranjang`,
       'success',
     );
     setActiveProduct(null);
@@ -229,6 +286,7 @@ export const CustomerOrderPage: React.FC = () => {
   };
 
   const handleUpdateCartQty = (cartItemId: string, delta: number) => {
+    idempotencyKeyRef.current = null;
     setCart((prev) =>
       prev
         .map((item) => {
@@ -246,6 +304,7 @@ export const CustomerOrderPage: React.FC = () => {
   };
 
   const handleRemoveCartItem = (cartItemId: string) => {
+    idempotencyKeyRef.current = null;
     setCart((prev) => prev.filter((item) => item.cartItemId !== cartItemId));
   };
 
@@ -258,36 +317,76 @@ export const CustomerOrderPage: React.FC = () => {
   };
 
   const handleOrderCreated = (order: Order) => {
-    try {
-      localStorage.setItem(SESSION_LAST_ORDER_KEY, order.id);
-    } catch {
-      // Ignore storage error
-    }
+    const trackingTok = (order as Order & { trackingToken?: string }).trackingToken;
     setCart([]);
     setDrawerOpen(false);
+    idempotencyKeyRef.current = null;
 
-    if (token && (order as Order & { trackingToken?: string }).trackingToken) {
-      localStorage.removeItem(cartKey);
-      navigate(`/tracking/${(order as Order & { trackingToken: string }).trackingToken}`);
+    if (token && trackingTok) {
+      try {
+        localStorage.removeItem(cartKey);
+        localStorage.setItem(trackingStorageKey, trackingTok);
+        setLastTrackingToken(trackingTok);
+      } catch {
+        // Ignore storage error
+      }
+      navigate(`/tracking/${encodeURIComponent(trackingTok)}`);
       return;
     }
-    const query = new URLSearchParams();
-    if (tableValidation.table) {
-      query.set('table', tableValidation.table.name);
-      if (tokenParam) query.set('token', tokenParam);
-    }
-    if (storeSlug) {
-      query.set('slug', storeSlug);
-    }
-    const qs = query.toString();
-    navigate(`/order-tracking/${order.id}${qs ? `?${qs}` : ''}`);
+    navigate(`/order-tracking/${order.id}`);
   };
 
   const databaseCheckout = async (input: CreateOrderInput): Promise<Order> => {
     if (!token) throw new Error('QR meja tidak tersedia.');
-    const response = await fetch(`/api/public/qr/${encodeURIComponent(token)}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerName: input.customerName, idempotencyKey: crypto.randomUUID(), paymentMethod: input.paymentMethod === 'CASHIER' ? 'CASH' : 'QRIS', orderType: input.orderType, fulfillmentMethod: input.fulfillmentMethod, items: input.items.map((item) => ({ productId: item.productId, quantity: item.quantity, variantIds: item.selectedVariants.map((variant) => variant.optionId), addonIds: item.selectedToppings.map((addon) => addon.id), notes: item.notes })) }) });
-    const payload = await response.json(); if (!response.ok) throw new Error(payload.error || 'Pesanan belum dapat dibuat.');
-    return { id: payload.id, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), customerName: input.customerName, orderType: input.orderType, fulfillmentMethod: input.fulfillmentMethod, tableId: tableValidation.table?.id, tableName: tableValidation.table?.name, items: input.items, totalAmount: payload.totalAmount, paymentMethod: input.paymentMethod, paymentStatus: 'BELUM_DIBAYAR', orderStatus: 'ORDER_BARU', cashierStatus: 'AKTIF', trackingToken: payload.trackingToken } as Order & { trackingToken: string };
+    const normalizedItems = input.items.map((item) => ({
+      productId: item.productId,
+      quantity: item.quantity,
+      variantIds: item.selectedVariants.map((variant) => variant.optionId),
+      addonIds: item.selectedToppings.map((addon) => addon.id),
+      notes: item.notes,
+    }));
+    const signature = JSON.stringify({
+      customerName: input.customerName,
+      paymentMethod: input.paymentMethod,
+      orderType: input.orderType,
+      fulfillmentMethod: input.fulfillmentMethod,
+      items: normalizedItems,
+    });
+    if (!idempotencyKeyRef.current || idempotencyKeyRef.current.signature !== signature) {
+      idempotencyKeyRef.current = { signature, key: crypto.randomUUID() };
+    }
+
+    const response = await fetch(`/api/public/qr/${encodeURIComponent(token)}/orders`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        customerName: input.customerName,
+        idempotencyKey: idempotencyKeyRef.current.key,
+        paymentMethod: input.paymentMethod === 'CASHIER' ? 'CASH' : 'QRIS',
+        orderType: input.orderType,
+        fulfillmentMethod: input.fulfillmentMethod,
+        items: normalizedItems,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'Pesanan belum dapat dibuat.');
+    return {
+      id: payload.id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      customerName: input.customerName,
+      orderType: input.orderType,
+      fulfillmentMethod: input.fulfillmentMethod,
+      tableId: tableValidation.table?.id,
+      tableName: tableValidation.table?.name,
+      items: input.items,
+      totalAmount: payload.totalAmount,
+      paymentMethod: input.paymentMethod,
+      paymentStatus: 'BELUM_DIBAYAR',
+      orderStatus: 'ORDER_BARU',
+      cashierStatus: 'AKTIF',
+      trackingToken: payload.trackingToken,
+    } as Order & { trackingToken: string };
   };
 
   const openCartDrawer = (initialStep: 'cart' | 'checkout' = 'cart') => {
@@ -295,7 +394,39 @@ export const CustomerOrderPage: React.FC = () => {
     setDrawerOpen(true);
   };
 
-  if (catalogError) return <main className="min-h-screen grid place-items-center bg-[#FAF9F6] p-5 text-center"><section className="max-w-sm rounded-2xl border border-[#E8E6DF] bg-white p-6"><h1 className="font-extrabold text-[#252525]">Menu tidak tersedia</h1><p className="mt-2 text-sm text-[#64625C]">{catalogError}</p></section></main>;
+  if (catalogError) {
+    return (
+      <main className="min-h-screen grid place-items-center bg-[#FAF9F6] p-5 text-center">
+        <section className="max-w-sm rounded-2xl border border-[#E8E6DF] bg-white p-7 shadow-sm space-y-3">
+          <div className="flex justify-center">
+            <BrandMark size="md" />
+          </div>
+          <h1 className="text-lg font-extrabold text-[#252525]">Menu tidak tersedia</h1>
+          <p className="text-sm text-[#5C5952] leading-relaxed">{catalogError}</p>
+          <p className="text-xs text-[#8C8980]">
+            Silakan minta staf outlet untuk memeriksa kartu QR meja atau pindai ulang QR terbaru.
+          </p>
+        </section>
+      </main>
+    );
+  }
+
+  if (loadingCatalog) {
+    return (
+      <div className="min-h-screen bg-[#FAF9F6] text-[#252525]" aria-busy="true" aria-label="Memuat katalog menu">
+        <div className="h-14 border-b border-[#E8E6DF] bg-white" />
+        <div className="mx-auto max-w-6xl px-4 sm:px-6 pt-5 space-y-5 animate-pulse">
+          <div className="h-36 rounded-2xl bg-[#1B4D3E]/85" />
+          <div className="h-11 rounded-xl bg-white border border-[#E8E6DF]" />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:w-2/3">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="h-32 sm:h-64 rounded-2xl bg-white border border-[#E8E6DF]" />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FAF9F6] text-[#252525] pb-24 lg:pb-12">
@@ -308,9 +439,9 @@ export const CustomerOrderPage: React.FC = () => {
               <div className="text-sm font-extrabold tracking-tight text-[#1B4D3E] truncate">
                 {settings.name}
               </div>
-              <div className="text-[11px] font-medium text-[#64625C] truncate">
+              <div className="text-[11px] font-medium text-[#5C5952] truncate">
                 {tableValidation.table
-                  ? `Meja ${tableValidation.table.name}`
+                  ? `Meja ${tableValidation.table.name}${tableValidation.table.area ? ` · ${tableValidation.table.area}` : ''}`
                   : forceTakeawayMode
                     ? 'Takeaway'
                     : settings.operatingHours}
@@ -319,13 +450,9 @@ export const CustomerOrderPage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            {activeTrackedOrder && (
+            {lastTrackingToken && (
               <Link
-                to={`/order-tracking/${activeTrackedOrder.id}${
-                  tableValidation.table
-                    ? `?table=${encodeURIComponent(tableValidation.table.name)}&token=${encodeURIComponent(tokenParam)}&slug=${encodeURIComponent(storeSlug || settings.slug)}`
-                    : `?slug=${encodeURIComponent(storeSlug || settings.slug)}`
-                }`}
+                to={`/tracking/${encodeURIComponent(lastTrackingToken)}`}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#E8E6DF] bg-[#FAF9F6] px-2.5 py-1.5 text-xs font-semibold text-[#1B4D3E] hover:bg-[#EEF4F1] transition-colors whitespace-nowrap"
               >
                 <Receipt className="h-3.5 w-3.5" />
@@ -361,16 +488,16 @@ export const CustomerOrderPage: React.FC = () => {
               <h1 className="mt-1 text-lg sm:text-2xl font-extrabold tracking-tight leading-snug">
                 Selamat Datang di {settings.name}
               </h1>
-              <p className="mt-1.5 text-xs sm:text-sm text-white/80 max-w-2xl leading-relaxed">
-                {settings.description}
-              </p>
+              {settings.description && (
+                <p className="mt-1.5 text-xs sm:text-sm text-white/85 max-w-2xl leading-relaxed">
+                  {settings.description}
+                </p>
+              )}
             </div>
 
             {tableValidation.table && (
               <div className="rounded-xl bg-[#FCD804] px-3.5 py-2.5 text-center text-[#252525] shrink-0">
-                <div className="text-[10px] font-bold uppercase tracking-wider opacity-80">
-                  Meja
-                </div>
+                <div className="text-[10px] font-bold uppercase tracking-wider opacity-80">Meja</div>
                 <div className="font-mono text-lg sm:text-xl font-extrabold leading-tight tabular-nums">
                   {tableValidation.table.name}
                 </div>
@@ -378,36 +505,47 @@ export const CustomerOrderPage: React.FC = () => {
             )}
           </div>
 
-          <div className="mt-3.5 pt-3 border-t border-white/15 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] sm:text-xs text-white/80">
-            <span className="inline-flex items-center gap-1.5">
-              <Clock className="h-3.5 w-3.5 text-[#FCD804] shrink-0" />
-              <span>{settings.operatingHours}</span>
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <MapPin className="h-3.5 w-3.5 text-[#FCD804] shrink-0" />
-              <span className="line-clamp-1">{settings.address}</span>
-            </span>
-          </div>
+          {(settings.operatingHours || settings.address) && (
+            <div className="mt-3.5 pt-3 border-t border-white/15 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] sm:text-xs text-white/85">
+              {settings.operatingHours && (
+                <span className="inline-flex items-center gap-1.5">
+                  <Clock className="h-3.5 w-3.5 text-[#FCD804] shrink-0" />
+                  <span>{settings.operatingHours}</span>
+                </span>
+              )}
+              {settings.address && (
+                <span className="inline-flex items-center gap-1.5">
+                  <MapPin className="h-3.5 w-3.5 text-[#FCD804] shrink-0" />
+                  <span className="line-clamp-1">{settings.address}</span>
+                </span>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Alerts for inactive/invalid table or closed cafe */}
         {!settings.isOpen && (
-          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-xs text-[#A62626]">
+          <div
+            role="status"
+            className="mt-4 flex items-start gap-2.5 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-xs text-[#A62626]"
+          >
             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
             <span>
-              <strong>{settings.name} sedang tutup sementara.</strong> Anda tetap dapat melihat katalog menu, namun checkout dinonaktifkan hingga cafe dibuka kembali.
+              <strong>{settings.name} sedang tutup sementara.</strong>{' '}
+              {entitlementInactive
+                ? 'Layanan pemesanan mandiri pada outlet ini sedang tidak aktif. Silakan memesan langsung di kasir.'
+                : 'Anda tetap dapat melihat katalog menu, namun checkout dinonaktifkan hingga outlet dibuka kembali.'}
             </span>
           </div>
         )}
 
-        {(tableValidation.status === 'INACTIVE_TABLE' ||
-          tableValidation.status === 'INVALID_TOKEN') && (
+        {(tableValidation.status === 'INACTIVE_TABLE' || tableValidation.status === 'INVALID_TOKEN') && (
           <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-4 py-3 text-xs text-[#7C4106]">
             <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5 text-[#9A520A]" />
             <span>
               {tableValidation.status === 'INACTIVE_TABLE'
                 ? `Meja ${tableParam} sedang tidak aktif. Anda tetap dapat memesan dengan mode Takeaway atau memilih meja lain saat checkout.`
-                : `Token QR meja tidak cocok atau sudah diperbarui. Anda tetap dapat melanjutkan pesanan melalui pilihan meja atau Takeaway saat checkout.`}
+                : 'Token QR meja tidak cocok atau sudah diperbarui. Anda tetap dapat melanjutkan pesanan melalui pilihan meja atau Takeaway saat checkout.'}
             </span>
           </div>
         )}
@@ -416,22 +554,22 @@ export const CustomerOrderPage: React.FC = () => {
         <div className="mt-5 sm:mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start">
           {/* Menu Catalog Column */}
           <div className="lg:col-span-8 space-y-4 sm:space-y-5">
-            {/* Search & Category Filter */}
             <div className="space-y-3">
               <div className="relative">
-                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64625C]" />
+                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5C5952]" />
                 <input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="Cari kopi, matcha, croissant..."
+                  aria-label="Cari menu"
                   className="w-full min-h-[44px] rounded-xl border border-[#E8E6DF] bg-white py-2.5 pl-10 pr-10 text-sm text-[#252525] placeholder:text-[#8C8980] focus:border-[#1B4D3E] focus:outline-none"
                 />
                 {search && (
                   <button
                     type="button"
                     onClick={() => setSearch('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-lg text-[#64625C] hover:bg-[#FAF9F6]"
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-7 w-7 items-center justify-center rounded-lg text-[#5C5952] hover:bg-[#FAF9F6]"
                     aria-label="Hapus pencarian"
                   >
                     <X className="h-4 w-4" />
@@ -446,7 +584,7 @@ export const CustomerOrderPage: React.FC = () => {
                   className={`min-h-[38px] rounded-xl px-3.5 py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
                     selectedCategory === 'ALL'
                       ? 'bg-[#1B4D3E] text-white'
-                      : 'border border-[#E8E6DF] bg-white text-[#64625C] hover:text-[#252525]'
+                      : 'border border-[#E8E6DF] bg-white text-[#5C5952] hover:text-[#252525]'
                   }`}
                 >
                   Semua Menu
@@ -459,7 +597,7 @@ export const CustomerOrderPage: React.FC = () => {
                     className={`min-h-[38px] rounded-xl px-3.5 py-2 text-xs font-bold transition-colors whitespace-nowrap shrink-0 ${
                       selectedCategory === cat.id
                         ? 'bg-[#1B4D3E] text-white'
-                        : 'border border-[#E8E6DF] bg-white text-[#64625C] hover:text-[#252525]'
+                        : 'border border-[#E8E6DF] bg-white text-[#5C5952] hover:text-[#252525]'
                     }`}
                   >
                     {cat.name}
@@ -468,12 +606,15 @@ export const CustomerOrderPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Product Grid: Clean horizontal cards on mobile, uniform vertical studio cards on sm+ */}
             {visibleProducts.length === 0 ? (
               <div className="rounded-2xl border border-[#E8E6DF] bg-white p-10 text-center">
-                <p className="text-sm font-bold text-[#252525]">Menu tidak ditemukan</p>
-                <p className="mt-1 text-xs text-[#64625C]">
-                  Coba kata kunci lain atau pilih kategori "Semua Menu".
+                <p className="text-sm font-bold text-[#252525]">
+                  {activeState.products.length === 0 ? 'Katalog menu sedang disiapkan' : 'Menu tidak ditemukan'}
+                </p>
+                <p className="mt-1 text-xs text-[#5C5952]">
+                  {activeState.products.length === 0
+                    ? 'Outlet ini belum menambahkan produk aktif ke katalog.'
+                    : 'Coba kata kunci lain atau pilih kategori "Semua Menu".'}
                 </p>
               </div>
             ) : (
@@ -514,16 +655,16 @@ export const CustomerOrderPage: React.FC = () => {
                       <div className="flex flex-1 flex-col justify-between sm:p-4 min-w-0">
                         <div>
                           {catName && (
-                            <p className="text-[11px] font-medium text-[#64625C] truncate">
-                              {catName}
-                            </p>
+                            <p className="text-[11px] font-medium text-[#5C5952] truncate">{catName}</p>
                           )}
                           <h3 className="text-sm sm:text-base font-bold text-[#252525] leading-snug truncate">
                             {product.name}
                           </h3>
-                          <p className="mt-0.5 sm:mt-1 text-xs text-[#64625C] line-clamp-2 leading-relaxed">
-                            {product.description}
-                          </p>
+                          {product.description && (
+                            <p className="mt-0.5 sm:mt-1 text-xs text-[#5C5952] line-clamp-2 leading-relaxed">
+                              {product.description}
+                            </p>
+                          )}
                         </div>
 
                         <div className="mt-2.5 sm:mt-3.5 flex items-center justify-between gap-2">
@@ -559,16 +700,14 @@ export const CustomerOrderPage: React.FC = () => {
                 <ShoppingBag className="h-4 w-4 text-[#1B4D3E]" />
                 <h2 className="text-sm font-extrabold text-[#252525]">Keranjang Pesanan</h2>
               </div>
-              <span className="font-mono text-xs font-semibold text-[#64625C] tabular-nums">
-                {totalQty} item
-              </span>
+              <span className="font-mono text-xs font-semibold text-[#5C5952] tabular-nums">{totalQty} item</span>
             </div>
 
             {cart.length === 0 ? (
               <div className="p-8 text-center">
                 <p className="text-sm font-semibold text-[#252525]">Belum ada item dipilih</p>
-                <p className="mt-1 text-xs text-[#64625C] leading-relaxed">
-                  Klik tombol Tambah pada produk untuk mengatur ukuran, gula, es, dan topping.
+                <p className="mt-1 text-xs text-[#5C5952] leading-relaxed">
+                  Klik tombol Tambah pada produk untuk mengatur varian dan topping favorit Anda.
                 </p>
               </div>
             ) : (
@@ -578,10 +717,8 @@ export const CustomerOrderPage: React.FC = () => {
                     <li key={item.cartItemId} className="py-3.5 space-y-2">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <p className="text-sm font-bold text-[#252525] truncate">
-                            {item.productName}
-                          </p>
-                          <p className="text-[11px] text-[#64625C] line-clamp-2">
+                          <p className="text-sm font-bold text-[#252525] truncate">{item.productName}</p>
+                          <p className="text-[11px] text-[#5C5952] line-clamp-2">
                             {[
                               ...item.selectedVariants.map((v) => v.optionLabel),
                               ...item.selectedToppings.map((t) => `+ ${t.name}`),
@@ -607,7 +744,7 @@ export const CustomerOrderPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => handleRemoveCartItem(item.cartItemId)}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-[#64625C] hover:text-[#B91C1C]"
+                            className="inline-flex items-center gap-1 text-[11px] font-medium text-[#5C5952] hover:text-[#B91C1C]"
                           >
                             <Trash2 className="h-3 w-3" />
                             <span>Hapus</span>
@@ -618,6 +755,7 @@ export const CustomerOrderPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => handleUpdateCartQty(item.cartItemId, -1)}
+                            aria-label={`Kurangi ${item.productName}`}
                             className="flex h-7 w-7 items-center justify-center text-[#252525] hover:bg-[#EDEAE2] rounded-l-lg"
                           >
                             <Minus className="h-3 w-3" />
@@ -628,6 +766,7 @@ export const CustomerOrderPage: React.FC = () => {
                           <button
                             type="button"
                             onClick={() => handleUpdateCartQty(item.cartItemId, 1)}
+                            aria-label={`Tambah ${item.productName}`}
                             className="flex h-7 w-7 items-center justify-center text-[#252525] hover:bg-[#EDEAE2] rounded-r-lg"
                           >
                             <Plus className="h-3 w-3" />
@@ -681,7 +820,6 @@ export const CustomerOrderPage: React.FC = () => {
         </div>
       )}
 
-      {/* Product Detail Configurator */}
       <ProductDetailModal
         product={activeProduct}
         editingItem={editingCartItem}
@@ -692,7 +830,6 @@ export const CustomerOrderPage: React.FC = () => {
         onConfirm={handleConfirmProduct}
       />
 
-      {/* Cart & Checkout & Payment Simulation Drawer */}
       <CartCheckoutDrawer
         open={drawerOpen}
         initialStep={drawerInitialStep}

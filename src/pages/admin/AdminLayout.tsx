@@ -54,6 +54,7 @@ export const AdminLayout: React.FC = () => {
   const [newOrderCount, setNewOrderCount] = useState(0);
   const [previewUrl, setPreviewUrl] = useState('/admin/tables');
   const [subBanner, setSubBanner] = useState('');
+  const [planSummary, setPlanSummary] = useState<{ planName: string; status: string; effectiveActive: boolean } | null>(null);
 
   const loadShell = useCallback(async () => {
     try {
@@ -78,10 +79,19 @@ export const AdminLayout: React.FC = () => {
         const firstActive = Array.isArray(t)
           ? t.find((x: { isActive: boolean; qrToken?: string }) => x.isActive && x.qrToken)
           : null;
-        if (firstActive?.qrToken) setPreviewUrl(`/q/${encodeURIComponent(firstActive.qrToken)}`);
+        if (firstActive?.qrToken) {
+          setPreviewUrl(`/q/${encodeURIComponent(firstActive.qrToken)}`);
+        } else {
+          setPreviewUrl('/admin/tables');
+        }
       }
       if (entRes.ok) {
         const ent = await entRes.json();
+        setPlanSummary({
+          planName: ent.planName || 'Basic',
+          status: ent.status || 'TRIAL',
+          effectiveActive: Boolean(ent.effectiveActive),
+        });
         if (!ent.effectiveActive) {
           setSubBanner(`Langganan (${ent.planName}) berstatus ${ent.status}. Pesanan lunas tetap dapat diproses.`);
         } else if (ent.status === 'TRIAL' && ent.trialEndsAt) {
@@ -105,6 +115,10 @@ export const AdminLayout: React.FC = () => {
     fetch('/api/auth/me')
       .then(async (response) => {
         if (!response.ok) return navigate('/merchant/login', { replace: true });
+        const me = await response.json().catch(() => null);
+        if (me?.role === 'SUPER_ADMIN') {
+          return navigate('/super-admin', { replace: true });
+        }
         if (active) {
           setSessionReady(true);
           await loadShell();
@@ -303,15 +317,39 @@ export const AdminLayout: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
-            <Link
-              to={previewUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 text-xs font-semibold text-[#252525] hover:border-[#1B4D3E]/40 hover:bg-white transition-colors whitespace-nowrap shrink-0"
-            >
-              <span>Buka Web Customer</span>
-              <ExternalLink className="h-3.5 w-3.5 text-[#1B4D3E]" />
-            </Link>
+            {planSummary && (
+              <Link
+                to="/admin/subscription"
+                className={`hidden sm:inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold transition-colors ${
+                  planSummary.effectiveActive
+                    ? 'border-[#B8E1C8] bg-[#E9F5EE] text-[#15623A] hover:bg-[#DDF0E5]'
+                    : 'border-[#F6D3AE] bg-[#FEF3E6] text-[#9A520A] hover:bg-[#FCE8D2]'
+                }`}
+              >
+                <span>{planSummary.planName}</span>
+                <span className="opacity-60">·</span>
+                <span>{planSummary.status === 'TRIAL' ? 'Trial' : planSummary.effectiveActive ? 'Aktif' : planSummary.status}</span>
+              </Link>
+            )}
+            {previewUrl.startsWith('/q/') ? (
+              <Link
+                to={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 text-xs font-semibold text-[#252525] hover:border-[#1B4D3E]/40 hover:bg-white transition-colors whitespace-nowrap shrink-0"
+              >
+                <span>Buka Web Customer</span>
+                <ExternalLink className="h-3.5 w-3.5 text-[#1B4D3E]" />
+              </Link>
+            ) : (
+              <Link
+                to="/admin/tables"
+                className="inline-flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 text-xs font-semibold text-[#252525] hover:border-[#1B4D3E]/40 hover:bg-white transition-colors whitespace-nowrap shrink-0"
+              >
+                <span>Siapkan QR Meja</span>
+                <QrCode className="h-3.5 w-3.5 text-[#1B4D3E]" />
+              </Link>
+            )}
           </div>
         </header>
 

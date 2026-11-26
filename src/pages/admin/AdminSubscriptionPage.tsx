@@ -1,5 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { CheckCircle2, AlertTriangle, Clock, XCircle, CreditCard, QrCode, Calculator, RefreshCw } from 'lucide-react';
+import { formatRupiah } from '../../utils/format';
+
+interface PublicPlan {
+  code: string;
+  name: string;
+  monthlyPrice: number;
+  trialDays: number;
+}
 
 interface Entitlement {
   hasSubscription: boolean;
@@ -34,15 +42,23 @@ const STATUS_CONFIG: Record<string, { label: string; icon: React.ElementType; cl
 
 export const AdminSubscriptionPage: React.FC = () => {
   const [ent, setEnt] = useState<Entitlement | null>(null);
+  const [plans, setPlans] = useState<PublicPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const load = async () => {
     setLoading(true);
     try {
-      const r = await fetch('/api/v1/orders/entitlements');
+      const [r, pr] = await Promise.all([
+        fetch('/api/v1/orders/entitlements'),
+        fetch('/api/public/plans'),
+      ]);
       if (!r.ok) throw new Error('Gagal memuat info langganan');
       setEnt(await r.json());
+      if (pr.ok) {
+        const planRows = await pr.json();
+        if (Array.isArray(planRows)) setPlans(planRows);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error');
     } finally {
@@ -148,6 +164,39 @@ export const AdminSubscriptionPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Available Plans Comparison */}
+      {plans.length > 0 && (
+        <div className="rounded-2xl border border-[#E8E6DF] bg-white p-5 space-y-3">
+          <h3 className="font-bold text-[#252525]">Pilihan Paket Platform</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {plans.map((p) => {
+              const isCurrent = ent.planCode === p.code;
+              return (
+                <div
+                  key={p.code}
+                  className={`rounded-xl border p-3.5 ${
+                    isCurrent ? 'border-[#1B4D3E] bg-[#EEF4F1]' : 'border-[#E8E6DF] bg-[#FAF9F6]'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-bold text-[#252525]">{p.name}</span>
+                    {isCurrent && (
+                      <span className="rounded-md bg-[#1B4D3E] px-2 py-0.5 text-[10px] font-bold text-white">
+                        Saat Ini
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1.5 font-mono text-sm font-extrabold text-[#1B4D3E] tabular-nums">
+                    {formatRupiah(p.monthlyPrice)}
+                    <span className="text-xs font-normal text-[#5C5952]">/bln</span>
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Contact */}
       <div className="rounded-2xl border border-[#E8E6DF] bg-[#FAF9F6] p-5">

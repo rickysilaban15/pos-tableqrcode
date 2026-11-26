@@ -10,7 +10,7 @@ type Table = { id: string; name: string; isActive: boolean };
 type Variant = { id: string; groupName: string; optionName: string; priceDelta: number; required: boolean };
 type Addon = { id: string; name: string; price: number; isActive: boolean };
 type Customizations = { variants: Variant[]; addons: Addon[] };
-type CartItem = { key: string; product: Product; quantity: number; variantIds: string[]; addonIds: string[]; notes: string; unitPrice: number };
+type CartItem = { key: string; product: Product; quantity: number; variantIds: string[]; addonIds: string[]; summaryLabel: string; notes: string; unitPrice: number };
 type Receipt = { id: string; totalAmount: number; orderStatus: string; paymentStatus: string; paymentMethod: 'CASH' | 'QRIS'; change?: number };
 type PosSettings = {
   name: string;
@@ -53,6 +53,7 @@ export const AdminPosPage: React.FC = () => {
   const [orderType, setOrderType] = useState<'DINE_IN' | 'TAKEAWAY'>('DINE_IN');
   const [fulfillment, setFulfillment] = useState<'TABLE_SERVICE' | 'PICKUP_COUNTER'>('TABLE_SERVICE');
   const [tableId, setTableId] = useState('');
+  const [customerName, setCustomerName] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'QRIS'>('CASH');
   const [cashReceived, setCashReceived] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -115,6 +116,15 @@ export const AdminPosPage: React.FC = () => {
   useEffect(() => {
     void loadCatalog();
   }, []);
+
+  useEffect(() => {
+    if (!selectedProduct) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectedProduct(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedProduct]);
 
   useEffect(() => {
     if (orderType === 'TAKEAWAY') {
@@ -180,12 +190,17 @@ export const AdminPosPage: React.FC = () => {
       setError(`Pilih satu opsi untuk ${missing[0]}.`);
       return;
     }
+    const summaryParts = [
+      ...customizations.variants.filter((v) => variantIds.includes(v.id)).map((v) => v.optionName),
+      ...customizations.addons.filter((a) => addonIds.includes(a.id)).map((a) => `+ ${a.name}`),
+    ];
+    const summaryLabel = summaryParts.join(' · ');
     const key = `${selectedProduct.id}:${[...variantIds].sort().join(',')}:${[...addonIds].sort().join(',')}:${notes.trim()}`;
     setCart((current) => {
       const old = current.find((line) => line.key === key);
       return old
         ? current.map((line) => (line.key === key ? { ...line, quantity: line.quantity + 1 } : line))
-        : [...current, { key, product: selectedProduct, quantity: 1, variantIds, addonIds, notes: notes.trim(), unitPrice: selectedUnitPrice }];
+        : [...current, { key, product: selectedProduct, quantity: 1, variantIds, addonIds, summaryLabel, notes: notes.trim(), unitPrice: selectedUnitPrice }];
     });
     idempotencyKey.current = null;
     setSelectedProduct(null);
@@ -213,7 +228,7 @@ export const AdminPosPage: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          customerName: 'Kasir',
+          customerName: customerName.trim() || 'Kasir',
           idempotencyKey: key,
           paymentMethod,
           orderType,
@@ -234,6 +249,7 @@ export const AdminPosPage: React.FC = () => {
       setReceipt({ ...data, paymentMethod });
       setCart([]);
       setCashReceived('');
+      setCustomerName('');
       idempotencyKey.current = null;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Transaksi tidak dapat dibuat.');
@@ -384,6 +400,7 @@ export const AdminPosPage: React.FC = () => {
                 <div className="flex justify-between gap-3">
                   <div className="min-w-0">
                     <strong className="block truncate text-sm">{line.product.name}</strong>
+                    {line.summaryLabel && <span className="block truncate text-xs text-[#1B4D3E] font-medium">{line.summaryLabel}</span>}
                     {line.notes && <span className="block truncate text-xs text-[#64625C]">{line.notes}</span>}
                   </div>
                   <span className="shrink-0 text-sm font-bold tabular-nums">{formatRupiah(line.unitPrice * line.quantity)}</span>
@@ -430,7 +447,19 @@ export const AdminPosPage: React.FC = () => {
           )}
         </div>
 
-        <fieldset className="mt-4 grid grid-cols-2 gap-2">
+        <label className="mt-4 block text-xs font-bold text-[#64625C]">
+          Nama pelanggan (opsional)
+          <input
+            type="text"
+            maxLength={80}
+            value={customerName}
+            onChange={(event) => setCustomerName(event.target.value)}
+            placeholder="Kosongkan untuk 'Kasir'"
+            className="mt-1.5 w-full rounded-xl border border-[#E8E6DF] bg-white px-3 py-2.5 text-sm text-[#252525] outline-none focus:border-[#1B4D3E]"
+          />
+        </label>
+
+        <fieldset className="mt-3 grid grid-cols-2 gap-2">
           <legend className="mb-2 text-xs font-bold text-[#64625C]">Jenis pesanan</legend>
           {dineInAllowed && (
             <button
@@ -517,16 +546,36 @@ export const AdminPosPage: React.FC = () => {
         )}
 
         {paymentMethod === 'CASH' && (
-          <label className="mt-3 block text-xs font-bold text-[#64625C]">
-            Tunai diterima
-            <input
-              inputMode="numeric"
-              value={cashReceived}
-              onChange={(event) => setCashReceived(event.target.value.replace(/[^0-9]/g, ''))}
-              placeholder="Contoh: 50000"
-              className="mt-1.5 w-full rounded-xl border border-[#E8E6DF] bg-white px-3 py-3 text-base tabular-nums outline-none focus:border-[#1B4D3E]"
-            />
-          </label>
+          <div className="mt-3 space-y-2">
+            <label className="block text-xs font-bold text-[#64625C]">
+              Tunai diterima
+              <input
+                inputMode="numeric"
+                value={cashReceived}
+                onChange={(event) => setCashReceived(event.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="Contoh: 50000"
+                className="mt-1.5 w-full rounded-xl border border-[#E8E6DF] bg-white px-3 py-3 text-base tabular-nums outline-none focus:border-[#1B4D3E]"
+              />
+            </label>
+            {total > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { label: 'Uang Pas', amount: total },
+                  ...(50000 >= total ? [{ label: 'Rp50.000', amount: 50000 }] : []),
+                  ...(100000 >= total ? [{ label: 'Rp100.000', amount: 100000 }] : []),
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => setCashReceived(String(preset.amount))}
+                    className="rounded-lg border border-[#E8E6DF] bg-[#FAF9F6] px-2.5 py-1 text-xs font-semibold text-[#1B4D3E] hover:bg-white"
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
 
         <div className="mt-5 border-t border-[#E8E6DF] pt-4">

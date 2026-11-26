@@ -29,6 +29,15 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
 
   useEffect(() => {
     if (!product) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [product, onClose]);
+
+  useEffect(() => {
+    if (!product) return;
 
     if (editingItem && editingItem.productId === product.id) {
       const vMap: Record<string, string> = {};
@@ -119,8 +128,13 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
       className="fixed inset-0 z-50 flex items-end justify-center sm:items-center bg-black/50 backdrop-blur-[2px] sm:p-4"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="product-modal-title"
+      onClick={onClose}
     >
-      <div className="w-full sm:max-w-lg max-h-[92vh] flex flex-col rounded-t-3xl sm:rounded-2xl bg-white border border-[#E8E6DF] shadow-2xl overflow-hidden">
+      <div
+        className="w-full sm:max-w-lg max-h-[92vh] flex flex-col rounded-t-3xl sm:rounded-2xl bg-white border border-[#E8E6DF] shadow-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Mobile grab indicator */}
         <div className="sm:hidden flex justify-center pt-2.5 pb-1 bg-white">
           <div className="h-1.5 w-10 rounded-full bg-[#D9D6CD]" />
@@ -143,7 +157,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
           <div className="p-5 sm:p-6 space-y-6">
             <div>
               <div className="flex items-start justify-between gap-4">
-                <h2 className="text-xl font-extrabold tracking-tight text-[#252525]">
+                <h2 id="product-modal-title" className="text-xl font-extrabold tracking-tight text-[#252525]">
                   {product.name}
                 </h2>
                 <span className="font-mono text-base font-bold text-[#1B4D3E] tabular-nums shrink-0">

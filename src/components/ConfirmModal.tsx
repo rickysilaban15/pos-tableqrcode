@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
 interface ConfirmModalProps {
@@ -22,6 +22,15 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   onConfirm,
   onCancel,
 }) => {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onCancel]);
+
   if (!open) return null;
 
   return (
@@ -29,8 +38,13 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
+      aria-labelledby="confirm-modal-title"
+      onClick={onCancel}
     >
-      <div className="w-full max-w-md rounded-2xl bg-white border border-[#E8E6DF] p-6 shadow-xl">
+      <div
+        className="w-full max-w-md rounded-2xl bg-white border border-[#E8E6DF] p-6 shadow-[0_20px_48px_rgba(37,37,37,0.16)]"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             {destructive && (
@@ -39,14 +53,16 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
               </div>
             )}
             <div>
-              <h3 className="text-base font-bold text-[#252525]">{title}</h3>
-              <p className="mt-1.5 text-sm leading-relaxed text-[#64625C]">{description}</p>
+              <h3 id="confirm-modal-title" className="text-base font-bold text-[#252525]">
+                {title}
+              </h3>
+              <p className="mt-1.5 text-sm leading-relaxed text-[#5C5952]">{description}</p>
             </div>
           </div>
           <button
             type="button"
             onClick={onCancel}
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#64625C] hover:bg-[#FAF9F6] hover:text-[#252525]"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[#5C5952] hover:bg-[#FAF9F6] hover:text-[#252525]"
             aria-label="Tutup"
           >
             <X className="h-4 w-4" />

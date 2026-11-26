@@ -4,11 +4,11 @@ import { ToastContainer } from './components/ToastContainer';
 import { ToastProvider } from './context/ToastContext';
 
 // Eager: tiny critical path
-import { LandingPage } from './pages/LandingPage';
 import { MerchantLoginPage } from './pages/admin/MerchantLoginPage';
 import { SuperAdminLoginPage } from './pages/superadmin/SuperAdminLoginPage';
 
 // Lazy chunks — split by surface
+const LandingPage = lazy(() => import('./pages/LandingPage').then((m) => ({ default: m.LandingPage })));
 const DemoPortalPage = lazy(() => import('./pages/DemoPortalPage').then((m) => ({ default: m.DemoPortalPage })));
 
 // Admin (merchant) surface
