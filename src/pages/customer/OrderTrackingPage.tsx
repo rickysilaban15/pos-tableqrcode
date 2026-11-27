@@ -22,6 +22,7 @@ import {
   getPaymentMethodLabel,
 } from '../../utils/format';
 import { BrandMark } from '../../components/BrandMark';
+import { DynamicQrisCard } from '../../components/DynamicQrisCard';
 import { ReceiptModal, type ReceiptData } from '../../components/ReceiptModal';
 import { CashierStatusBadge, PaymentStatusBadge } from '../../components/StatusBadge';
 
@@ -72,6 +73,14 @@ type TrackedOrder = Order & {
   paidAt?: string | null;
   completedAt?: string | null;
   tableQrToken?: string | null;
+  paymentProvider?: string | null;
+  paymentEnvironment?: string | null;
+  providerOrderId?: string | null;
+  providerStatus?: string | null;
+  qrString?: string | null;
+  qrImageUrl?: string | null;
+  paymentExpiresAt?: string | null;
+  reconciliationStatus?: string | null;
 };
 
 export const OrderTrackingPage: React.FC = () => {
@@ -83,6 +92,8 @@ export const OrderTrackingPage: React.FC = () => {
   const [trackingError, setTrackingError] = useState('');
   const [copiedId, setCopiedId] = useState(false);
   const [receiptModalOpen, setReceiptModalOpen] = useState(false);
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileMessage, setReconcileMessage] = useState('');
 
   const refreshTracking = useCallback(async () => {
     if (!token) {
@@ -133,7 +144,12 @@ export const OrderTrackingPage: React.FC = () => {
         subtotal: item.unitPrice * item.quantity,
       })),
       totalAmount: value.totalAmount,
-      paymentMethod: value.paymentMethod === 'CASH' ? 'CASHIER' : 'QRIS',
+      paymentMethod:
+        value.paymentMethod === 'CASH'
+          ? 'CASHIER'
+          : value.paymentMethod === 'QRIS_DYNAMIC'
+            ? 'QRIS_DYNAMIC'
+            : 'QRIS',
       paymentStatus:
         value.paymentStatus === 'PAID'
           ? 'LUNAS'
@@ -156,6 +172,14 @@ export const OrderTrackingPage: React.FC = () => {
       paidAt: value.paidAt,
       completedAt: value.completedAt,
       tableQrToken: value.tableQrToken,
+      paymentProvider: value.paymentProvider ?? null,
+      paymentEnvironment: value.paymentEnvironment ?? null,
+      providerOrderId: value.providerOrderId ?? null,
+      providerStatus: value.providerStatus ?? null,
+      qrString: value.qrString ?? null,
+      qrImageUrl: value.qrImageUrl ?? null,
+      paymentExpiresAt: value.paymentExpiresAt ?? null,
+      reconciliationStatus: value.reconciliationStatus ?? null,
     });
     setTrackingError('');
     setLoading(false);
@@ -276,7 +300,15 @@ export const OrderTrackingPage: React.FC = () => {
     tableName: order.tableName ?? null,
     orderStatus: postgresOrder?.rawOrderStatus ?? order.orderStatus,
     paymentStatus: postgresOrder?.rawPaymentStatus ?? order.paymentStatus,
-    method: order.paymentMethod === 'CASHIER' ? 'CASH' : 'QRIS',
+    method:
+      order.paymentMethod === 'CASHIER'
+        ? 'CASH'
+        : order.paymentMethod === 'QRIS_DYNAMIC'
+          ? 'QRIS_DYNAMIC'
+          : 'QRIS',
+    paymentProvider: postgresOrder?.paymentProvider,
+    paymentEnvironment: postgresOrder?.paymentEnvironment,
+    providerOrderId: postgresOrder?.providerOrderId,
     cashReceived: postgresOrder?.cashReceived,
     changeAmount: postgresOrder?.changeAmount,
     totalAmount: order.totalAmount,
@@ -293,6 +325,36 @@ export const OrderTrackingPage: React.FC = () => {
         note: it.notes,
       },
     })),
+  };
+
+  const handleReconcileTracking = async () => {
+    if (!token || reconciling) return;
+    setReconciling(true);
+    setReconcileMessage('');
+    try {
+      const response = await fetch(`/api/public/tracking/${encodeURIComponent(token)}/reconcile`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || 'Pengecekan status ke Midtrans gagal.');
+      }
+      await refreshTracking();
+      if (data.paymentStatus === 'PAID') {
+        pushToast('Pembayaran QRIS Otomatis terverifikasi!', 'success');
+        setReconcileMessage('');
+      } else if (data.paymentStatus === 'EXPIRED') {
+        setReconcileMessage('Waktu pembayaran QRIS telah berakhir.');
+      } else if (data.paymentStatus === 'FAILED') {
+        setReconcileMessage('Pembayaran ditolak atau dibatalkan.');
+      } else {
+        setReconcileMessage('Status di Midtrans masih menunggu pembayaran (pending).');
+      }
+    } catch (err) {
+      setReconcileMessage(err instanceof Error ? err.message : 'Gagal memeriksa status pembayaran.');
+    } finally {
+      setReconciling(false);
+    }
   };
 
   const handleCopyOrderId = async () => {
@@ -472,7 +534,31 @@ export const OrderTrackingPage: React.FC = () => {
               </span>
             </div>
 
-            {order.paymentStatus === 'BELUM_DIBAYAR' && !isTerminalCancelled && (
+            {order.paymentMethod === 'QRIS_DYNAMIC' && order.paymentStatus !== 'LUNAS' && (
+              <div className="mt-4">
+                <DynamicQrisCard
+                  merchantName={brandName}
+                  amount={order.totalAmount}
+                  providerOrderId={postgresOrder?.providerOrderId}
+                  qrString={postgresOrder?.qrString}
+                  qrImageUrl={postgresOrder?.qrImageUrl}
+                  expiresAt={postgresOrder?.paymentExpiresAt}
+                  environment={postgresOrder?.paymentEnvironment ?? 'SANDBOX'}
+                  status={
+                    postgresOrder?.rawOrderStatus === 'EXPIRED' || postgresOrder?.rawPaymentStatus === 'EXPIRED'
+                      ? 'EXPIRED'
+                      : postgresOrder?.rawPaymentStatus === 'FAILED' || postgresOrder?.rawOrderStatus === 'CANCELLED'
+                        ? 'FAILED'
+                        : 'PENDING'
+                  }
+                  reconciling={reconciling}
+                  reconcileMessage={reconcileMessage}
+                  onReconcile={() => void handleReconcileTracking()}
+                />
+              </div>
+            )}
+
+            {order.paymentMethod !== 'QRIS_DYNAMIC' && order.paymentStatus === 'BELUM_DIBAYAR' && !isTerminalCancelled && (
               <div role="status" className="mt-3 rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-4 py-3 text-xs text-[#7C4106] leading-relaxed">
                 {order.paymentMethod === 'QRIS' ? (
                   <>

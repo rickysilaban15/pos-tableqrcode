@@ -122,8 +122,13 @@ export const SuperAdminOverviewPage: React.FC = () => {
       <div className="rounded-2xl bg-gradient-to-r from-[#1B4D3E]/60 to-[#0D2B22]/60 border border-[#FCD804]/15 p-5">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Total GMV (all time)</p>
+            <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Total GMV Produksi (all time)</p>
             <p className="mt-2 text-3xl font-extrabold text-[#FCD804]">{formatRp(metrics.totalGmv)}</p>
+            {(metrics.sandboxPaidOrders ?? 0) > 0 && (
+              <p className="mt-1.5 text-xs text-amber-300/80">
+                Dikecualikan dari GMV produksi: {metrics.sandboxPaidOrders} transaksi uji Sandbox ({formatRp(metrics.sandboxGmv ?? 0)})
+              </p>
+            )}
           </div>
           <ShoppingCart className="h-10 w-10 text-[#FCD804]/30" />
         </div>

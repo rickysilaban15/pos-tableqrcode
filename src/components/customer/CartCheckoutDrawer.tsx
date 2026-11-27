@@ -17,6 +17,8 @@ import {
   UtensilsCrossed,
   ShoppingBag,
   Loader2,
+  Sparkles,
+  ArrowRight,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import type { CreateOrderInput } from '../../context/PosContext';
@@ -32,8 +34,9 @@ import type {
 import { formatRupiah, getFulfillmentLabel, getOrderTypeLabel } from '../../utils/format';
 import { ProductImage } from '../ProductImage';
 import { QrCodeCanvas } from '../QrCodeCanvas';
+import { DynamicQrisCard } from '../DynamicQrisCard';
 
-type DrawerStep = 'cart' | 'checkout' | 'payment' | 'payment_failed';
+type DrawerStep = 'cart' | 'checkout' | 'payment' | 'dynamic_qris' | 'payment_failed';
 
 interface CartCheckoutDrawerProps {
   open: boolean;
@@ -46,6 +49,7 @@ interface CartCheckoutDrawerProps {
   onRemoveItem: (cartItemId: string) => void;
   onEditItem: (item: CartItem) => void;
   onOrderCreated: (order: Order) => void;
+  onOrderInitiated?: (order: Order) => void;
   /** Supplies the PostgreSQL checkout while retaining this original LARIS drawer. */
   onDatabaseCheckout?: (input: CreateOrderInput) => Promise<Order>;
   settingsOverride?: CafeSettings;
@@ -88,6 +92,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   onRemoveItem,
   onEditItem,
   onOrderCreated,
+  onOrderInitiated,
   onDatabaseCheckout,
   settingsOverride,
   tablesOverride,
@@ -108,6 +113,10 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   const [copiedVa, setCopiedVa] = useState(false);
   const [formError, setFormError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeDynamicOrder, setActiveDynamicOrder] = useState<(Order & { trackingToken?: string }) | null>(null);
+  const [dynamicStatus, setDynamicStatus] = useState<'PENDING' | 'PAID' | 'EXPIRED' | 'FAILED'>('PENDING');
+  const [reconciling, setReconciling] = useState(false);
+  const [reconcileNote, setReconcileNote] = useState('');
 
   useEffect(() => {
     if (!open) return;
@@ -132,6 +141,16 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
     setStep(initialStep);
     setFormError('');
     setIsSubmitting(false);
+    setActiveDynamicOrder(null);
+    setDynamicStatus('PENDING');
+    setReconcileNote('');
+    if (settings.dynamicQrisAvailable && onDatabaseCheckout) {
+      setPaymentMethod('QRIS_DYNAMIC');
+    } else if (settings.qrisImageUrl) {
+      setPaymentMethod('QRIS');
+    } else {
+      setPaymentMethod('CASHIER');
+    }
 
     const canDineIn = settings.enableDineIn && !forceTakeawayMode;
     const canTakeaway = settings.enableTakeaway;
@@ -190,8 +209,38 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
   }, [orderType, fulfillmentMethod, settings.enableTableService, settings.enablePickupCounter]);
 
   useEffect(() => {
-    if (!settings.qrisImageUrl && paymentMethod === 'QRIS') setPaymentMethod('CASHIER');
-  }, [paymentMethod, settings.qrisImageUrl]);
+    if (!settings.qrisImageUrl && paymentMethod === 'QRIS') {
+      setPaymentMethod(settings.dynamicQrisAvailable && onDatabaseCheckout ? 'QRIS_DYNAMIC' : 'CASHIER');
+    }
+    if ((!settings.dynamicQrisAvailable || !onDatabaseCheckout) && paymentMethod === 'QRIS_DYNAMIC') {
+      setPaymentMethod(settings.qrisImageUrl ? 'QRIS' : 'CASHIER');
+    }
+  }, [paymentMethod, settings.qrisImageUrl, settings.dynamicQrisAvailable, onDatabaseCheckout]);
+
+  const activeTrackingToken = activeDynamicOrder?.trackingToken;
+
+  useEffect(() => {
+    if (step !== 'dynamic_qris' || !activeTrackingToken || typeof EventSource === 'undefined') return;
+    let navigated = false;
+    const es = new EventSource(`/api/public/tracking/${encodeURIComponent(activeTrackingToken)}/events`);
+    es.addEventListener('payment:confirmed', () => {
+      setDynamicStatus('PAID');
+      setReconcileNote('Pembayaran berhasil diverifikasi! Mengalihkan ke pelacakan pesanan…');
+      if (!navigated && activeDynamicOrder) {
+        navigated = true;
+        window.setTimeout(() => onOrderCreated(activeDynamicOrder), 850);
+      }
+    });
+    es.addEventListener('order:expired', () => {
+      setDynamicStatus('EXPIRED');
+    });
+    es.addEventListener('order:cancelled', () => {
+      setDynamicStatus('FAILED');
+    });
+    return () => {
+      es.close();
+    };
+  }, [step, activeTrackingToken, activeDynamicOrder, onOrderCreated]);
 
   if (!open) return null;
 
@@ -261,7 +310,71 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
       return;
     }
 
+    if (paymentMethod === 'QRIS_DYNAMIC') {
+      setIsSubmitting(true);
+      try {
+        const created = (await submitOrder({
+          customerName: customerName.trim(),
+          customerWhatsapp: customerWhatsapp.trim() || undefined,
+          orderNote: orderNote.trim() || undefined,
+          orderType,
+          fulfillmentMethod: orderType === 'TAKEAWAY' ? 'PICKUP_COUNTER' : fulfillmentMethod,
+          tableId: resolvedTable?.id,
+          tableName: resolvedTable?.name,
+          tableToken: resolvedTable?.token,
+          items: cart.map(({ cartItemId: _ignore, ...snapshot }) => snapshot),
+          totalAmount,
+          paymentMethod: 'QRIS_DYNAMIC',
+          paymentStatus: 'BELUM_DIBAYAR',
+        })) as Order & { trackingToken?: string };
+        onOrderInitiated?.(created);
+        setActiveDynamicOrder(created);
+        setDynamicStatus('PENDING');
+        setReconcileNote('');
+        setStep('dynamic_qris');
+      } catch (err) {
+        setFormError(err instanceof Error ? err.message : 'Gagal membuat tagihan QRIS Otomatis. Silakan coba lagi.');
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
     setStep('payment');
+  };
+
+  const handleReconcileDynamicOrder = async () => {
+    if (!activeDynamicOrder?.trackingToken || reconciling) return;
+    setReconciling(true);
+    setReconcileNote('');
+    try {
+      const response = await fetch(
+        `/api/public/tracking/${encodeURIComponent(activeDynamicOrder.trackingToken)}/reconcile`,
+        { method: 'POST' },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || 'Gagal memeriksa status pembayaran.');
+      }
+      if (data.paymentStatus === 'PAID') {
+        setDynamicStatus('PAID');
+        setReconcileNote('Pembayaran berhasil diverifikasi! Mengalihkan ke pelacakan pesanan…');
+        pushToast('Pembayaran QRIS Otomatis berhasil diverifikasi!', 'success');
+        window.setTimeout(() => onOrderCreated(activeDynamicOrder), 800);
+      } else if (data.paymentStatus === 'EXPIRED' || data.orderStatus === 'EXPIRED') {
+        setDynamicStatus('EXPIRED');
+        setReconcileNote('Waktu pembayaran QRIS telah berakhir.');
+      } else if (data.paymentStatus === 'FAILED' || data.orderStatus === 'CANCELLED') {
+        setDynamicStatus('FAILED');
+        setReconcileNote('Tagihan QRIS ditolak atau dibatalkan.');
+      } else {
+        setReconcileNote('Pembayaran masih berstatus menunggu (pending) di Midtrans Sandbox.');
+      }
+    } catch (err) {
+      setReconcileNote(err instanceof Error ? err.message : 'Gagal memeriksa status pembayaran.');
+    } finally {
+      setReconciling(false);
+    }
   };
 
   const handleConfirmPaymentInstruction = async () => {
@@ -349,6 +462,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                 {step === 'cart' && `Keranjang (${totalQty})`}
                 {step === 'checkout' && 'Checkout Pesanan'}
                 {step === 'payment' && (onDatabaseCheckout ? 'Pembayaran QRIS' : 'Simulasi Pembayaran')}
+                {step === 'dynamic_qris' && 'Pembayaran QRIS Otomatis'}
                 {step === 'payment_failed' && 'Pembayaran Gagal'}
               </h2>
               {scannedTable && orderType === 'DINE_IN' && (
@@ -670,12 +784,29 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                 </h3>
                 <div className="grid grid-cols-2 gap-2">
                   {[
+                    {
+                      id: 'QRIS_DYNAMIC' as const,
+                      label: 'Pembayaran QRIS Otomatis',
+                      sub: 'Verifikasi otomatis · Sandbox',
+                      icon: Sparkles,
+                    },
                     { id: 'QRIS' as const, label: 'QRIS', sub: 'Scan QRIS merchant', icon: QrCode },
                     { id: 'E_WALLET' as const, label: 'E-Wallet', sub: 'GoPay / OVO', icon: Wallet },
                     { id: 'BANK_TRANSFER' as const, label: 'Transfer Bank', sub: 'Virtual Account', icon: Landmark },
                     { id: 'CASHIER' as const, label: 'Bayar di Kasir', sub: 'Tunai di kasir', icon: Store },
                   ]
-                    .filter((m) => (m.id !== 'QRIS' || Boolean(settings.qrisImageUrl)) && (!onDatabaseCheckout || m.id === 'QRIS' || m.id === 'CASHIER'))
+                    .filter((m) => {
+                      if (m.id === 'QRIS_DYNAMIC') {
+                        return Boolean(onDatabaseCheckout && settings.dynamicQrisAvailable);
+                      }
+                      if (m.id === 'QRIS') {
+                        return Boolean(settings.qrisImageUrl);
+                      }
+                      if (onDatabaseCheckout) {
+                        return m.id === 'CASHIER';
+                      }
+                      return true;
+                    })
                     .map((m) => {
                     const Icon = m.icon;
                     const active = paymentMethod === m.id;
@@ -771,10 +902,12 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                 {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
                 <span>
                   {isSubmitting
-                    ? 'Mengirim Pesanan...'
+                    ? 'Memproses Pesanan...'
                     : paymentMethod === 'CASHIER'
                       ? `Buat Pesanan · ${formatRupiah(totalAmount)}`
-                      : `Lanjut Pembayaran · ${formatRupiah(totalAmount)}`}
+                      : paymentMethod === 'QRIS_DYNAMIC'
+                        ? `Buat QRIS Otomatis · ${formatRupiah(totalAmount)}`
+                        : `Lanjut Pembayaran · ${formatRupiah(totalAmount)}`}
                 </span>
               </button>
             </div>
@@ -875,6 +1008,43 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                   <span>Batalkan Simulasi Pembayaran</span>
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* STEP 3B: DYNAMIC QRIS MIDTRANS SANDBOX */}
+        {step === 'dynamic_qris' && activeDynamicOrder && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+              <DynamicQrisCard
+                merchantName={settings.name}
+                amount={activeDynamicOrder.totalAmount}
+                providerOrderId={activeDynamicOrder.dynamicPayment?.providerOrderId}
+                qrString={activeDynamicOrder.dynamicPayment?.qrString}
+                qrImageUrl={activeDynamicOrder.dynamicPayment?.qrImageUrl}
+                expiresAt={activeDynamicOrder.dynamicPayment?.expiresAt}
+                environment={activeDynamicOrder.dynamicPayment?.environment ?? 'SANDBOX'}
+                status={dynamicStatus}
+                reconciling={reconciling}
+                reconcileMessage={reconcileNote}
+                onReconcile={() => void handleReconcileDynamicOrder()}
+                onRecoveryAction={() => {
+                  setActiveDynamicOrder(null);
+                  onClose();
+                }}
+                recoveryLabel="Tutup & Pesan Ulang"
+              />
+            </div>
+
+            <div className="border-t border-[#E8E6DF] bg-white p-4 sm:p-5">
+              <button
+                type="button"
+                onClick={() => onOrderCreated(activeDynamicOrder)}
+                className="w-full min-h-[46px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#1B4D3E] px-5 py-3 text-sm font-bold text-white hover:bg-[#143B2F] transition-colors"
+              >
+                <span>Buka Halaman Pelacakan Pesanan</span>
+                <ArrowRight className="h-4 w-4" />
+              </button>
             </div>
           </div>
         )}

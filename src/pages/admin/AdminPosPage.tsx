@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, CheckCircle2, Minus, Plus, ReceiptText, Search, ShoppingBag, X } from 'lucide-react';
 import { ProductImage } from '../../components/ProductImage';
+import { DynamicQrisCard } from '../../components/DynamicQrisCard';
 import { ReceiptModal, type ReceiptData } from '../../components/ReceiptModal';
+import type { DynamicQrisPaymentInfo } from '../../types/pos';
 import { formatRupiah } from '../../utils/format';
 
 type Product = { id: string; name: string; description: string; price: number; imageUrl: string; categoryId: string | null; isActive: boolean };
@@ -11,7 +13,15 @@ type Variant = { id: string; groupName: string; optionName: string; priceDelta: 
 type Addon = { id: string; name: string; price: number; isActive: boolean };
 type Customizations = { variants: Variant[]; addons: Addon[] };
 type CartItem = { key: string; product: Product; quantity: number; variantIds: string[]; addonIds: string[]; summaryLabel: string; notes: string; unitPrice: number };
-type Receipt = { id: string; totalAmount: number; orderStatus: string; paymentStatus: string; paymentMethod: 'CASH' | 'QRIS'; change?: number };
+type Receipt = {
+  id: string;
+  totalAmount: number;
+  orderStatus: string;
+  paymentStatus: string;
+  paymentMethod: 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
+  change?: number;
+  payment?: DynamicQrisPaymentInfo;
+};
 type PosSettings = {
   name: string;
   isOpen: boolean;
@@ -20,6 +30,7 @@ type PosSettings = {
   enableTableService: boolean;
   enablePickupCounter: boolean;
   qrisImageUrl: string;
+  dynamicQrisAvailable: boolean;
 };
 
 const defaultSettings: PosSettings = {
@@ -30,6 +41,7 @@ const defaultSettings: PosSettings = {
   enableTableService: true,
   enablePickupCounter: true,
   qrisImageUrl: '',
+  dynamicQrisAvailable: false,
 };
 const emptyCustomizations: Customizations = { variants: [], addons: [] };
 const unique = <T,>(values: T[]) => [...new Set(values)];
@@ -54,7 +66,9 @@ export const AdminPosPage: React.FC = () => {
   const [fulfillment, setFulfillment] = useState<'TABLE_SERVICE' | 'PICKUP_COUNTER'>('TABLE_SERVICE');
   const [tableId, setTableId] = useState('');
   const [customerName, setCustomerName] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'QRIS'>('CASH');
+  const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'QRIS' | 'QRIS_DYNAMIC'>('CASH');
+  const [reconcilingPos, setReconcilingPos] = useState(false);
+  const [reconcilePosNote, setReconcilePosNote] = useState('');
   const [cashReceived, setCashReceived] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [customizations, setCustomizations] = useState<Customizations>(emptyCustomizations);
@@ -91,6 +105,7 @@ export const AdminPosPage: React.FC = () => {
         enableTableService: data[3].enableTableService ?? true,
         enablePickupCounter: data[3].enablePickupCounter ?? true,
         qrisImageUrl: data[3].qrisImageUrl ?? '',
+        dynamicQrisAvailable: Boolean(data[3].paymentGateway?.dynamicQrisAvailable),
       };
       setProducts(data[0].filter((product: Product) => product.isActive));
       setCategories(data[1].filter((category: Category) => category.isActive));
@@ -102,7 +117,7 @@ export const AdminPosPage: React.FC = () => {
       } else if (!nextSettings.enableTableService && nextSettings.enablePickupCounter) {
         setFulfillment('PICKUP_COUNTER');
       }
-      if (!nextSettings.qrisImageUrl) {
+      if (!nextSettings.qrisImageUrl && !nextSettings.dynamicQrisAvailable) {
         setPaymentMethod('CASH');
       }
       setError('');
@@ -116,6 +131,45 @@ export const AdminPosPage: React.FC = () => {
   useEffect(() => {
     void loadCatalog();
   }, []);
+
+  // Auto-update POS Dynamic QRIS receipt when webhook or background reconciliation confirms payment
+  useEffect(() => {
+    if (
+      !receipt ||
+      receipt.paymentMethod !== 'QRIS_DYNAMIC' ||
+      receipt.paymentStatus === 'PAID' ||
+      typeof EventSource === 'undefined'
+    ) {
+      return;
+    }
+    const es = new EventSource('/api/v1/events');
+    const onPaymentConfirmed = (ev: MessageEvent) => {
+      try {
+        const payload = JSON.parse(ev.data || '{}');
+        if (!payload.orderId || payload.orderId === receipt.id) {
+          setReceipt((prev) =>
+            prev && prev.id === receipt.id
+              ? { ...prev, paymentStatus: 'PAID', orderStatus: payload.orderStatus || 'NEW_ORDER' }
+              : prev,
+          );
+          setReconcilePosNote('Pembayaran QRIS Otomatis terverifikasi!');
+        }
+      } catch {}
+    };
+    const onExpired = (ev: MessageEvent) => {
+      try {
+        const payload = JSON.parse(ev.data || '{}');
+        if (!payload.orderId || payload.orderId === receipt.id) {
+          setReceipt((prev) =>
+            prev && prev.id === receipt.id ? { ...prev, paymentStatus: 'EXPIRED', orderStatus: 'EXPIRED' } : prev,
+          );
+        }
+      } catch {}
+    };
+    es.addEventListener('payment:confirmed', onPaymentConfirmed as EventListener);
+    es.addEventListener('order:expired', onExpired as EventListener);
+    return () => es.close();
+  }, [receipt]);
 
   useEffect(() => {
     if (!selectedProduct) return;
@@ -216,6 +270,9 @@ export const AdminPosPage: React.FC = () => {
     if (paymentMethod === 'QRIS' && !settings.qrisImageUrl) {
       return setError('QRIS belum dikonfigurasi pada Pengaturan Cafe.');
     }
+    if (paymentMethod === 'QRIS_DYNAMIC' && !settings.dynamicQrisAvailable) {
+      return setError('QRIS Otomatis belum tersedia untuk outlet ini.');
+    }
     if (paymentMethod === 'CASH' && (!cashReceived || Number(cashReceived) < total)) {
       return setError('Nominal tunai kurang dari total tagihan.');
     }
@@ -275,6 +332,42 @@ export const AdminPosPage: React.FC = () => {
       setError(reason instanceof Error ? reason.message : 'Pembayaran QRIS tidak dapat diverifikasi.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const reconcileDynamicPosReceipt = async () => {
+    if (!receipt || reconcilingPos) return;
+    setReconcilingPos(true);
+    setReconcilePosNote('');
+    setError('');
+    try {
+      const response = await fetch(`/api/v1/payments/${receipt.id}/reconcile`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error || 'Pengecekan status Midtrans gagal.');
+      setReceipt((prev) =>
+        prev
+          ? {
+              ...prev,
+              orderStatus: data.orderStatus ?? prev.orderStatus,
+              paymentStatus: data.paymentStatus ?? prev.paymentStatus,
+            }
+          : prev,
+      );
+      if (data.paymentStatus === 'PAID') {
+        setReconcilePosNote('Pembayaran QRIS Otomatis terverifikasi!');
+      } else if (data.paymentStatus === 'EXPIRED') {
+        setReconcilePosNote('Tagihan QRIS Otomatis telah kedaluwarsa.');
+      } else if (data.paymentStatus === 'FAILED') {
+        setReconcilePosNote('Tagihan QRIS Otomatis dibatalkan atau ditolak.');
+      } else {
+        setReconcilePosNote('Masih menunggu penyelesaian pembayaran di Midtrans Sandbox.');
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Pengecekan status Midtrans gagal.');
+    } finally {
+      setReconcilingPos(false);
     }
   };
 
@@ -526,16 +619,25 @@ export const AdminPosPage: React.FC = () => {
           Pembayaran
           <select
             value={paymentMethod}
-            onChange={(event) => setPaymentMethod(event.target.value as 'CASH' | 'QRIS')}
+            onChange={(event) => setPaymentMethod(event.target.value as 'CASH' | 'QRIS' | 'QRIS_DYNAMIC')}
             className="mt-1.5 w-full rounded-xl border border-[#E8E6DF] bg-white px-3 py-3 text-base text-[#252525] outline-none focus:border-[#1B4D3E]"
           >
             <option value="CASH">Tunai</option>
             {qrisAvailable && <option value="QRIS">QRIS — verifikasi manual</option>}
+            {settings.dynamicQrisAvailable && (
+              <option value="QRIS_DYNAMIC">QRIS Otomatis — Midtrans Sandbox</option>
+            )}
           </select>
         </label>
 
-        {!qrisAvailable && (
+        {!qrisAvailable && !settings.dynamicQrisAvailable && (
           <p className="mt-2 text-xs text-[#64625C]">QRIS belum dikonfigurasi di Pengaturan Cafe; hanya pembayaran tunai yang tersedia.</p>
+        )}
+
+        {paymentMethod === 'QRIS_DYNAMIC' && settings.dynamicQrisAvailable && (
+          <div className="mt-3 rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-3.5 py-2.5 text-xs text-[#7C4106]">
+            <strong>Mode Sandbox:</strong> sistem akan menerbitkan QRIS dinamis resmi Midtrans Sandbox dan memverifikasi pembayaran secara otomatis.
+          </div>
         )}
 
         {paymentMethod === 'QRIS' && qrisAvailable && (
@@ -593,10 +695,51 @@ export const AdminPosPage: React.FC = () => {
           onClick={() => void submit()}
           className="mt-4 w-full rounded-xl bg-[#1B4D3E] px-4 py-3 text-sm font-bold text-white shadow-[0_6px_14px_rgba(27,77,62,0.22)] transition hover:bg-[#143c30] focus:outline-none focus:ring-2 focus:ring-[#1B4D3E] focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy ? 'Memproses transaksi…' : paymentMethod === 'CASH' ? 'Konfirmasi pembayaran tunai' : 'Buat tagihan QRIS'}
+          {busy
+            ? 'Memproses transaksi…'
+            : paymentMethod === 'CASH'
+              ? 'Konfirmasi pembayaran tunai'
+              : paymentMethod === 'QRIS_DYNAMIC'
+                ? 'Buat QRIS Otomatis'
+                : 'Buat tagihan QRIS'}
         </button>
 
-        {receipt && (
+        {receipt && receipt.paymentMethod === 'QRIS_DYNAMIC' ? (
+          <div className="mt-4 space-y-3">
+            <DynamicQrisCard
+              compact
+              merchantName={settings.name}
+              amount={receipt.totalAmount}
+              providerOrderId={receipt.payment?.providerOrderId}
+              qrString={receipt.payment?.qrString}
+              qrImageUrl={receipt.payment?.qrImageUrl}
+              expiresAt={receipt.payment?.expiresAt}
+              environment={receipt.payment?.environment ?? 'SANDBOX'}
+              status={
+                receipt.paymentStatus === 'PAID'
+                  ? 'PAID'
+                  : receipt.paymentStatus === 'EXPIRED'
+                    ? 'EXPIRED'
+                    : receipt.paymentStatus === 'FAILED'
+                      ? 'FAILED'
+                      : 'PENDING'
+              }
+              reconciling={reconcilingPos}
+              reconcileMessage={reconcilePosNote}
+              onReconcile={() => void reconcileDynamicPosReceipt()}
+              onRecoveryAction={() => setReceipt(null)}
+              recoveryLabel="Tutup Tagihan"
+            />
+            <button
+              type="button"
+              onClick={() => void openReceiptModal(receipt.id)}
+              className="inline-flex items-center gap-1 text-sm font-bold text-[#1B4D3E] underline underline-offset-4"
+            >
+              <ReceiptText className="h-4 w-4" />
+              Cetak struk
+            </button>
+          </div>
+        ) : receipt ? (
           <div className={`mt-4 rounded-xl p-4 text-sm ${receipt.paymentStatus === 'PAID' ? 'bg-[#EEF4F1] text-[#1B4D3E]' : 'border border-[#F6D3AE] bg-[#FEF3E6] text-[#7C4106]'}`}>
             <div className="flex items-start gap-2">
               <Check className="mt-0.5 h-5 w-5 shrink-0" />
@@ -624,7 +767,7 @@ export const AdminPosPage: React.FC = () => {
               Cetak struk
             </button>
           </div>
-        )}
+        ) : null}
       </aside>
 
       <ReceiptModal receipt={receiptModal} onClose={() => setReceiptModal(null)} />

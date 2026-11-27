@@ -5,7 +5,7 @@ import { ReceiptModal, type ReceiptData } from '../../components/ReceiptModal';
 import { ConfirmModal } from '../../components/ConfirmModal';
 
 type OrderStatus = 'AWAITING_PAYMENT' | 'NEW_ORDER' | 'IN_PROGRESS' | 'READY_TO_SERVE';
-type Method = 'CASH' | 'QRIS';
+type Method = 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
 type Item = {
   productName: string;
   unitPrice: number;
@@ -24,6 +24,9 @@ type Order = {
   paymentStatus: string;
   createdAt: string;
   method: Method;
+  provider?: string;
+  environment?: 'SANDBOX' | 'PRODUCTION' | string;
+  providerOrderId?: string | null;
   orderSource?: 'QR' | 'POS';
   orderType?: 'DINE_IN' | 'TAKEAWAY';
   fulfillmentMethod?: 'TABLE_SERVICE' | 'PICKUP_COUNTER';
@@ -45,7 +48,8 @@ const statusClass: Record<OrderStatus, string> = {
   READY_TO_SERVE: 'bg-[#E9F5EE] text-[#15623A] border-[#B8E1C8]',
 };
 
-const paymentLabel = (method: Method) => (method === 'CASH' ? 'Tunai' : 'QRIS');
+const paymentLabel = (method: Method) =>
+  method === 'CASH' ? 'Tunai' : method === 'QRIS_DYNAMIC' ? 'QRIS Otomatis' : 'QRIS Statis';
 
 const Selections: React.FC<{ item: Item }> = ({ item }) => {
   const s = item.selections;
@@ -192,6 +196,26 @@ export const AdminOrdersPage: React.FC = () => {
       return;
     }
     setNotice(`Pembayaran ${order.id} telah diverifikasi. Pesanan masuk ke antrean.`);
+    await load();
+  };
+
+  const reconcileDynamic = async (order: Order) => {
+    setWorking(order.id);
+    setError('');
+    const response = await fetch(`/api/v1/payments/${order.id}/reconcile`, { method: 'POST' });
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Pengecekan status Midtrans gagal');
+      return;
+    }
+    if (payload.paymentStatus === 'PAID') {
+      setNotice(`Pembayaran QRIS Otomatis ${order.id} terverifikasi oleh Midtrans. Pesanan masuk antrean.`);
+    } else if (payload.paymentStatus === 'EXPIRED') {
+      setNotice(`Tagihan QRIS Otomatis ${order.id} telah kedaluwarsa.`);
+    } else {
+      setNotice(`Status Midtrans untuk ${order.id} masih menunggu pembayaran (${payload.providerStatus ?? 'pending'}).`);
+    }
     await load();
   };
 
@@ -350,6 +374,11 @@ export const AdminOrdersPage: React.FC = () => {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {order.environment === 'SANDBOX' && (
+                      <span className="inline-flex shrink-0 whitespace-nowrap rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-[#9A520A]">
+                        SANDBOX
+                      </span>
+                    )}
                     <span
                       className={`inline-flex shrink-0 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${
                         order.orderStatus === 'AWAITING_PAYMENT'
@@ -413,7 +442,11 @@ export const AdminOrdersPage: React.FC = () => {
                       {order.orderStatus === 'AWAITING_PAYMENT' && (
                         <>
                           <label className="text-xs font-medium text-[#64625C]">
-                            {order.method === 'CASH' ? 'Tunai diterima' : 'Bukti QRIS telah diverifikasi'}
+                            {order.method === 'CASH'
+                              ? 'Tunai diterima'
+                              : order.method === 'QRIS_DYNAMIC'
+                                ? 'Menunggu penyelesaian QRIS Otomatis (Midtrans)'
+                                : 'Bukti QRIS telah diverifikasi'}
                           </label>
                           {order.method === 'CASH' && (
                             <div className="space-y-1.5">
@@ -449,15 +482,27 @@ export const AdminOrdersPage: React.FC = () => {
                               )}
                             </div>
                           )}
-                          <button
-                            type="button"
-                            disabled={working === order.id}
-                            onClick={() => void pay(order)}
-                            className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] transition-colors hover:bg-[#EEF4F1] disabled:opacity-60"
-                          >
-                            <Banknote className="h-4 w-4" />
-                            Verifikasi Pembayaran
-                          </button>
+                          {order.method === 'QRIS_DYNAMIC' ? (
+                            <button
+                              type="button"
+                              disabled={working === order.id}
+                              onClick={() => void reconcileDynamic(order)}
+                              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] transition-colors hover:bg-[#EEF4F1] disabled:opacity-60"
+                            >
+                              <RefreshCw className={`h-4 w-4 ${working === order.id ? 'animate-spin' : ''}`} />
+                              Cek Status Midtrans
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={working === order.id}
+                              onClick={() => void pay(order)}
+                              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] transition-colors hover:bg-[#EEF4F1] disabled:opacity-60"
+                            >
+                              <Banknote className="h-4 w-4" />
+                              Verifikasi Pembayaran
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={working === order.id}

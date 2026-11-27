@@ -22,7 +22,7 @@ type DashboardOrder = Order & {
 export const AdminDashboardPage: React.FC = () => {
   const [state, setState] = useState<{ orders: DashboardOrder[]; activities: ActivityLog[]; tables: CafeTable[] }>({ orders: [], activities: [], tables: [] });
   const [revenue, setRevenue] = useState(0);
-  const [metrics, setMetrics] = useState({ totalOrders: 0, awaitingPaymentOrders: 0, newOrders: 0, inProgressOrders: 0, readyOrders: 0 });
+  const [metrics, setMetrics] = useState({ totalOrders: 0, awaitingPaymentOrders: 0, newOrders: 0, inProgressOrders: 0, readyOrders: 0, sandboxOrdersToday: 0, sandboxGrossToday: 0 });
   const [error, setError] = useState('');
   const [onboarding, setOnboarding] = useState<{ profileConfigured: boolean; hasCategory: boolean; hasProduct: boolean; hasTableWithQr: boolean; hasPaidOrder: boolean; firstQrToken: string | null } | null>(null);
 
@@ -66,6 +66,8 @@ export const AdminDashboardPage: React.FC = () => {
       newOrders: data.metrics.newOrders ?? 0,
       inProgressOrders: data.metrics.inProgressOrders ?? 0,
       readyOrders: data.metrics.readyOrders ?? 0,
+      sandboxOrdersToday: data.metrics.sandboxOrdersToday ?? 0,
+      sandboxGrossToday: data.metrics.sandboxGrossToday ?? 0,
     });
     setOnboarding(data.onboarding ?? null);
     setError('');
@@ -158,7 +160,11 @@ export const AdminDashboardPage: React.FC = () => {
           <p className="mt-2 font-mono text-2xl font-bold text-[#FCD804] tabular-nums">
             {formatRupiah(simulatedRevenue)}
           </p>
-          <p className="mt-1 text-xs text-white/75">Lunas & selesai</p>
+          <p className="mt-1 text-xs text-white/75">
+            {metrics.sandboxOrdersToday > 0
+              ? `Riil · +${metrics.sandboxOrdersToday} uji Sandbox (${formatRupiah(metrics.sandboxGrossToday)})`
+              : 'Lunas & selesai'}
+          </p>
         </div>
       </section>
 

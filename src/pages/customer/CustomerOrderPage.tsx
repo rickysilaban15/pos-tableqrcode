@@ -316,12 +316,10 @@ export const CustomerOrderPage: React.FC = () => {
     setActiveProduct(product);
   };
 
-  const handleOrderCreated = (order: Order) => {
+  const handleOrderInitiated = (order: Order) => {
     const trackingTok = (order as Order & { trackingToken?: string }).trackingToken;
     setCart([]);
-    setDrawerOpen(false);
     idempotencyKeyRef.current = null;
-
     if (token && trackingTok) {
       try {
         localStorage.removeItem(cartKey);
@@ -330,6 +328,15 @@ export const CustomerOrderPage: React.FC = () => {
       } catch {
         // Ignore storage error
       }
+    }
+  };
+
+  const handleOrderCreated = (order: Order) => {
+    const trackingTok = (order as Order & { trackingToken?: string }).trackingToken;
+    handleOrderInitiated(order);
+    setDrawerOpen(false);
+
+    if (token && trackingTok) {
       navigate(`/tracking/${encodeURIComponent(trackingTok)}`);
       return;
     }
@@ -356,13 +363,20 @@ export const CustomerOrderPage: React.FC = () => {
       idempotencyKeyRef.current = { signature, key: crypto.randomUUID() };
     }
 
+    const apiMethod =
+      input.paymentMethod === 'CASHIER'
+        ? 'CASH'
+        : input.paymentMethod === 'QRIS_DYNAMIC'
+          ? 'QRIS_DYNAMIC'
+          : 'QRIS';
+
     const response = await fetch(`/api/public/qr/${encodeURIComponent(token)}/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         customerName: input.customerName,
         idempotencyKey: idempotencyKeyRef.current.key,
-        paymentMethod: input.paymentMethod === 'CASHIER' ? 'CASH' : 'QRIS',
+        paymentMethod: apiMethod,
         orderType: input.orderType,
         fulfillmentMethod: input.fulfillmentMethod,
         items: normalizedItems,
@@ -385,6 +399,7 @@ export const CustomerOrderPage: React.FC = () => {
       paymentStatus: 'BELUM_DIBAYAR',
       orderStatus: 'ORDER_BARU',
       cashierStatus: 'AKTIF',
+      dynamicPayment: payload.payment ?? undefined,
       trackingToken: payload.trackingToken,
     } as Order & { trackingToken: string };
   };
@@ -841,6 +856,7 @@ export const CustomerOrderPage: React.FC = () => {
         onRemoveItem={handleRemoveCartItem}
         onEditItem={handleEditCartItem}
         onOrderCreated={handleOrderCreated}
+        onOrderInitiated={handleOrderInitiated}
         onDatabaseCheckout={token ? databaseCheckout : undefined}
         settingsOverride={postgresState?.cafeSettings}
         tablesOverride={postgresState?.tables}

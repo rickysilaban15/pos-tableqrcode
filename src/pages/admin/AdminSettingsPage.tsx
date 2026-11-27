@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Save, Upload, AlertTriangle } from 'lucide-react';
+import { Save, Upload, AlertTriangle, CheckCircle2, ShieldAlert } from 'lucide-react';
 import type { CafeSettings } from '../../types/pos';
 import { getQrUrlWarning, normalizeBaseUrl } from '../../utils/format';
 import { BrandMark } from '../../components/BrandMark';
@@ -252,6 +252,88 @@ export const AdminSettingsPage: React.FC = () => {
                 </div>
               ) : (
                 <div className="text-xs text-[#9A520A]">QRIS belum dikonfigurasi — opsi QRIS otomatis disembunyikan untuk mencegah pembayaran gagal.</div>
+              )}
+            </div>
+
+            {/* Dynamic QRIS Payment Gateway Diagnostics & Toggle */}
+            <div className="sm:col-span-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] p-4 space-y-3.5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xs font-bold text-[#252525]">
+                      Status Metode Pembayaran & Gateway (Midtrans Core API v2)
+                    </h3>
+                    <span className="rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-[#9A520A]">
+                      {form.paymentGateway?.environment ?? 'SANDBOX'}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-[#64625C]">
+                    Kredensial server dikelola secara aman di backend (tanpa mengekspos kunci rahasia ke browser).
+                  </p>
+                </div>
+
+                <label className="inline-flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-white px-3 py-2 text-xs font-semibold text-[#252525] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.enableDynamicQris ?? true}
+                    onChange={(e) => setForm({ ...form, enableDynamicQris: e.target.checked })}
+                    disabled={!form.paymentGateway?.dynamicQrisEligible}
+                    className="h-4 w-4 accent-[#1B4D3E] disabled:opacity-50"
+                  />
+                  <span>Aktifkan QRIS Otomatis</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">Tunai di Kasir</div>
+                  <div className="mt-1 flex items-center gap-1.5 font-bold text-[#15623A]">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>Aktif</span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">QRIS Statis Manual</div>
+                  <div
+                    className={`mt-1 flex items-center gap-1.5 font-bold ${
+                      form.qrisImageUrl?.trim() ? 'text-[#15623A]' : 'text-[#64625C]'
+                    }`}
+                  >
+                    <span>{form.qrisImageUrl?.trim() ? 'Aktif (Verifikasi Kasir)' : 'Belum Dikonfigurasi'}</span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">QRIS Otomatis (Midtrans)</div>
+                  <div
+                    className={`mt-1 flex items-center gap-1.5 font-bold ${
+                      form.paymentGateway?.dynamicQrisAvailable ? 'text-[#15623A]' : 'text-[#9A520A]'
+                    }`}
+                  >
+                    <span>
+                      {form.paymentGateway?.dynamicQrisAvailable
+                        ? 'Siap Digunakan (Sandbox)'
+                        : form.paymentGateway?.dynamicQrisEligible
+                          ? 'Dinonaktifkan Outlet'
+                          : 'Menunggu Konfigurasi'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {form.paymentGateway?.warnings && form.paymentGateway.warnings.length > 0 && (
+                <div className="rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-3.5 py-2.5 text-xs text-[#7C4106] space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-[#9A520A]" />
+                    <span>Catatan Kesiapan Gateway:</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                    {form.paymentGateway.warnings.map((w, idx) => (
+                      <li key={idx}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
             <div className="sm:col-span-2">

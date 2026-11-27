@@ -13,7 +13,10 @@ type HistoryOrder = {
   fulfillmentMethod: 'TABLE_SERVICE' | 'PICKUP_COUNTER';
   orderSource: 'QR' | 'POS';
   tableName: string | null;
-  method: 'CASH' | 'QRIS';
+  method: 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
+  provider?: string;
+  environment?: 'SANDBOX' | 'PRODUCTION' | string;
+  providerOrderId?: string | null;
   cashReceived: number | null;
   changeAmount: number | null;
   paidAt: string | null;
@@ -28,7 +31,11 @@ type PaymentRow = {
   customerName: string;
   orderSource: 'QR' | 'POS';
   orderStatus: string;
-  method: 'CASH' | 'QRIS';
+  method: 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
+  provider?: string;
+  environment?: 'SANDBOX' | 'PRODUCTION' | string;
+  providerOrderId?: string | null;
+  reconciliationStatus?: string | null;
   status: string;
   amount: number;
   cashReceived: number | null;
@@ -47,6 +54,9 @@ type Summary = {
   posRevenue: number;
   cashRevenue: number;
   qrisRevenue: number;
+  qrisDynamicGross?: number;
+  sandboxPaidOrders?: number;
+  sandboxGrossVolume?: number;
 };
 
 const defaultSummary: Summary = {
@@ -85,6 +95,7 @@ export const AdminHistoryPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState('READY_TO_SERVE');
   const [sourceFilter, setSourceFilter] = useState('ALL');
   const [methodFilter, setMethodFilter] = useState('ALL');
+  const [envFilter, setEnvFilter] = useState('ALL');
   const [search, setSearch] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -101,6 +112,7 @@ export const AdminHistoryPage: React.FC = () => {
         status: statusFilter,
         source: sourceFilter,
         method: methodFilter,
+        environment: envFilter,
         page: String(page),
         pageSize: '50',
       });
@@ -111,6 +123,7 @@ export const AdminHistoryPage: React.FC = () => {
       const payParams = new URLSearchParams({
         source: sourceFilter,
         method: methodFilter,
+        environment: envFilter,
         paginated: '1',
         page: String(page),
         pageSize: '50',
@@ -137,11 +150,11 @@ export const AdminHistoryPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo, page, tab]);
+  }, [statusFilter, sourceFilter, methodFilter, envFilter, search, dateFrom, dateTo, page, tab]);
 
   useEffect(() => {
     setPage(1);
-  }, [statusFilter, sourceFilter, methodFilter, search, dateFrom, dateTo, tab]);
+  }, [statusFilter, sourceFilter, methodFilter, envFilter, search, dateFrom, dateTo, tab]);
 
   useEffect(() => {
     void load();
@@ -187,7 +200,7 @@ export const AdminHistoryPage: React.FC = () => {
   };
 
   const exportCsv = () => {
-    const params = new URLSearchParams({ source: sourceFilter, method: methodFilter });
+    const params = new URLSearchParams({ source: sourceFilter, method: methodFilter, environment: envFilter });
     if (tab === 'orders') params.set('status', statusFilter);
     if (search.trim()) params.set('q', search.trim());
     if (dateFrom) params.set('dateFrom', dateFrom);
@@ -242,12 +255,30 @@ export const AdminHistoryPage: React.FC = () => {
               <span className="font-mono font-bold text-[#252525] tabular-nums">{formatRupiah(summary.cashRevenue)}</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-[#64625C]">QRIS</span>
+              <span className="text-[#64625C]">QRIS Statis</span>
               <span className="font-mono font-bold text-[#1B4D3E] tabular-nums">{formatRupiah(summary.qrisRevenue)}</span>
             </div>
+            {(summary.qrisDynamicGross ?? 0) > 0 && (
+              <div className="flex justify-between">
+                <span className="text-[#64625C]">QRIS Otomatis (Bruto)</span>
+                <span className="font-mono font-bold text-[#1B4D3E] tabular-nums">
+                  {formatRupiah(summary.qrisDynamicGross ?? 0)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </section>
+
+      {(summary.sandboxPaidOrders ?? 0) > 0 && (
+        <section className="rounded-2xl border border-[#F6D3AE] bg-[#FEF3E6] px-4 py-3 text-xs text-[#7C4106] flex flex-wrap items-center justify-between gap-2">
+          <span>
+            <strong>Pemisahan Keuangan Sandbox:</strong> terdapat{' '}
+            <strong>{summary.sandboxPaidOrders} transaksi uji Midtrans Sandbox</strong> (volume bruto{' '}
+            <strong className="font-mono">{formatRupiah(summary.sandboxGrossVolume ?? 0)}</strong>) yang dikecualikan dari KPI Omzet Produksi di atas. Nominal QRIS Otomatis dicatat sebagai pembayaran bruto pelanggan sebelum potongan MDR penyedia.
+          </span>
+        </section>
+      )}
 
       {/* Channel Proportion Bar */}
       {summary.paidRevenue > 0 && (
@@ -326,7 +357,18 @@ export const AdminHistoryPage: React.FC = () => {
             >
               <option value="ALL">Semua Metode</option>
               <option value="CASH">Tunai</option>
-              <option value="QRIS">QRIS</option>
+              <option value="QRIS">QRIS Statis</option>
+              <option value="QRIS_DYNAMIC">QRIS Otomatis</option>
+            </select>
+            <select
+              aria-label="Filter lingkungan transaksi"
+              value={envFilter}
+              onChange={(e) => setEnvFilter(e.target.value)}
+              className="rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-2 text-xs font-semibold text-[#252525] focus:border-[#1B4D3E] focus:outline-none"
+            >
+              <option value="ALL">Semua Lingkungan</option>
+              <option value="PRODUCTION">Produksi Riil</option>
+              <option value="SANDBOX">Sandbox Simulasi</option>
             </select>
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#64625C]" />
@@ -458,7 +500,18 @@ export const AdminHistoryPage: React.FC = () => {
                         </span>
                       </td>
                       <td className="px-4 py-3.5 text-xs font-semibold text-[#252525]">
-                        {order.method === 'CASH' ? 'Tunai' : 'QRIS'}
+                        <div>
+                          {order.method === 'CASH'
+                            ? 'Tunai'
+                            : order.method === 'QRIS_DYNAMIC'
+                              ? 'QRIS Otomatis'
+                              : 'QRIS Statis'}
+                        </div>
+                        {order.environment === 'SANDBOX' && (
+                          <span className="mt-0.5 inline-block rounded border border-[#F6D3AE] bg-[#FEF3E6] px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#9A520A]">
+                            SANDBOX
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3.5 text-xs font-semibold text-[#15623A]">
                         {statusLabel[order.orderStatus] ?? order.orderStatus}
@@ -513,7 +566,25 @@ export const AdminHistoryPage: React.FC = () => {
                     </td>
                     <td className="px-4 py-3.5 text-xs font-semibold">{pay.orderSource}</td>
                     <td className="px-4 py-3.5 text-xs font-semibold">
-                      {pay.method === 'CASH' ? 'Tunai' : 'QRIS'}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span>
+                          {pay.method === 'CASH'
+                            ? 'Tunai'
+                            : pay.method === 'QRIS_DYNAMIC'
+                              ? 'QRIS Otomatis'
+                              : 'QRIS Statis'}
+                        </span>
+                        {pay.environment === 'SANDBOX' && (
+                          <span className="rounded border border-[#F6D3AE] bg-[#FEF3E6] px-1.5 py-0.2 font-mono text-[10px] font-bold text-[#9A520A]">
+                            SANDBOX
+                          </span>
+                        )}
+                      </div>
+                      {pay.providerOrderId && (
+                        <div className="font-mono text-[11px] font-normal text-[#64625C]">
+                          {pay.providerOrderId}
+                        </div>
+                      )}
                       {pay.cashReceived != null && (
                         <div className="font-mono text-[11px] font-normal text-[#64625C]">
                           Diterima {formatRupiah(pay.cashReceived)} · Kembali {formatRupiah(pay.changeAmount ?? 0)}

@@ -28,7 +28,10 @@ export interface ReceiptData {
   tableName?: string | null;
   orderStatus: string;
   paymentStatus: string;
-  method: 'CASH' | 'QRIS' | string;
+  method: 'CASH' | 'QRIS' | 'QRIS_DYNAMIC' | string;
+  paymentProvider?: string | null;
+  paymentEnvironment?: string | null;
+  providerOrderId?: string | null;
   cashReceived?: number | null;
   changeAmount?: number | null;
   totalAmount: number;
@@ -136,8 +139,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ receipt, onClose }) 
               {receipt.outletName && <p className="text-xs text-[#5C5952]">{receipt.outletName}</p>}
               {receipt.address && <p className="mt-0.5 text-[11px] text-[#5C5952]">{receipt.address}</p>}
               {receipt.whatsapp && <p className="text-[11px] text-[#5C5952]">WA: {receipt.whatsapp}</p>}
+              {receipt.paymentEnvironment === 'SANDBOX' && (
+                <div className="mt-2.5 inline-block rounded-lg border border-[#F6D3AE] bg-[#FEF3E6] px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-[#9A520A]">
+                  SIMULASI SANDBOX — TANPA UANG ASLI
+                </div>
+              )}
               {isPaid && !isThermal && (
-                <div className="mt-2.5 inline-flex items-center gap-1 rounded-full bg-[#E9F5EE] border border-[#B8E1C8] px-2.5 py-0.5 text-[11px] font-bold text-[#15623A]">
+                <div className="mt-2 inline-flex items-center gap-1 rounded-full bg-[#E9F5EE] border border-[#B8E1C8] px-2.5 py-0.5 text-[11px] font-bold text-[#15623A]">
                   <CheckCircle2 className="h-3 w-3" />
                   <span>PEMBAYARAN LUNAS TERVERIFIKASI</span>
                 </div>
@@ -201,11 +209,21 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ receipt, onClose }) 
               </div>
               <div className="flex justify-between">
                 <dt className="text-[#5C5952]">Pembayaran</dt>
-                <dd className="font-semibold">
-                  {receipt.method === 'CASH' || receipt.method === 'CASHIER' ? 'Tunai' : 'QRIS'} (
-                  {isPaid ? 'LUNAS' : receipt.paymentStatus === 'REFUNDED' ? 'REFUND' : 'MENUNGGU'})
+                <dd className="font-semibold text-right">
+                  {receipt.method === 'CASH' || receipt.method === 'CASHIER'
+                    ? 'Tunai'
+                    : receipt.method === 'QRIS_DYNAMIC'
+                      ? `QRIS Otomatis${receipt.paymentEnvironment === 'SANDBOX' ? ' (Sandbox)' : ''}`
+                      : 'QRIS Statis'}{' '}
+                  ({isPaid ? 'LUNAS' : receipt.paymentStatus === 'REFUNDED' ? 'REFUND' : 'MENUNGGU'})
                 </dd>
               </div>
+              {receipt.providerOrderId && (
+                <div className="flex justify-between gap-2">
+                  <dt className="text-[#5C5952]">Ref Penyedia</dt>
+                  <dd className="font-mono text-[11px] tabular-nums text-right">{receipt.providerOrderId}</dd>
+                </div>
+              )}
               {receipt.cashReceived != null && (
                 <div className="flex justify-between">
                   <dt className="text-[#5C5952]">Tunai Diterima</dt>

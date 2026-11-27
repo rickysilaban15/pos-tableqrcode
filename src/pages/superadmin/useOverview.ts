@@ -7,6 +7,8 @@ export interface OverviewMetrics {
   inactiveSubscriptions: number;
   totalPaidOrders: number;
   totalGmv: number;
+  sandboxPaidOrders?: number;
+  sandboxGmv?: number;
   mrr: number;
 }
 
