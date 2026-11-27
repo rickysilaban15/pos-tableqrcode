@@ -5,6 +5,7 @@ import { allowRoles, isUuid, requireAuth, requireMerchantContext } from '../../m
 import { sanitizeCsvCell } from '../../middleware/security.ts';
 import { publishTenantEvent, publishTrackingEvent } from '../events/bus.ts';
 import { expireAbandonedOrders } from '../orders/service.ts';
+import { reconcileOrderDynamicPayment } from './reconcile.ts';
 
 const DATE_PARAM_RE = /^\d{4}-\d{2}-\d{2}$/;
 const input = z.object({ cashReceived: z.number().int().min(0).max(200_000_000).optional() });
@@ -35,6 +36,7 @@ function buildPaymentWhere(
   const method = typeof query.method === 'string' ? query.method : 'ALL';
   const status = typeof query.status === 'string' ? query.status : 'ALL';
   const source = typeof query.source === 'string' ? query.source : 'ALL';
+  const environment = typeof query.environment === 'string' ? query.environment : 'ALL';
   const q = typeof query.q === 'string' ? query.q.trim() : '';
   const dateFrom = typeof query.dateFrom === 'string' ? query.dateFrom.trim() : '';
   const dateTo = typeof query.dateTo === 'string' ? query.dateTo.trim() : '';
@@ -60,9 +62,15 @@ function buildPaymentWhere(
     params.push(source);
     filters.push(`o.order_source = $${params.length}`);
   }
+  if (environment !== 'ALL') {
+    params.push(environment);
+    filters.push(`COALESCE(p.environment, 'PRODUCTION') = $${params.length}`);
+  }
   if (q) {
     params.push(`%${q}%`);
-    filters.push(`(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length})`);
+    filters.push(
+      `(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length} OR COALESCE(p.provider_order_id,'') ILIKE $${params.length})`,
+    );
   }
   if (dateFrom) {
     params.push(dateFrom);
@@ -102,9 +110,13 @@ paymentsRouter.get('/', async (req, res, next) => {
     const [rowsResult, countResult] = await Promise.all([
       pool.query(
         `SELECT p.id, p.order_id "orderId", o.customer_name "customerName", o.order_source "orderSource",
-                o.order_status "orderStatus", p.method, p.status, p.amount,
+                o.order_status "orderStatus", p.method, p.provider, p.environment,
+                p.provider_order_id "providerOrderId", p.provider_transaction_id "providerTransactionId",
+                p.provider_status "providerStatus", p.reconciliation_status "reconciliationStatus",
+                p.status, p.amount, p.expected_gross_amount "expectedGrossAmount", p.currency,
                 p.cash_received "cashReceived", p.change_amount "changeAmount",
-                p.created_at "createdAt", p.paid_at "paidAt", u.name "verifiedByName"
+                p.created_at "createdAt", p.paid_at "paidAt", p.expires_at "expiresAt",
+                u.name "verifiedByName"
          FROM payments p
          JOIN orders o ON o.id = p.order_id
          LEFT JOIN users u ON u.id = p.verified_by
@@ -147,8 +159,10 @@ paymentsRouter.get('/export.csv', async (req, res, next) => {
       await pool.query(
         `SELECT p.id, p.order_id "orderId", p.created_at "createdAt", p.paid_at "paidAt",
                 o.customer_name "customerName", o.order_source "orderSource",
-                o.order_status "orderStatus", p.method, p.status, p.amount,
-                p.cash_received "cashReceived", p.change_amount "changeAmount",
+                o.order_status "orderStatus", p.method, p.provider, p.environment,
+                p.provider_order_id "providerOrderId", p.provider_transaction_id "providerTransactionId",
+                p.reconciliation_status "reconciliationStatus",
+                p.status, p.amount, p.cash_received "cashReceived", p.change_amount "changeAmount",
                 u.name "verifiedByName"
          FROM payments p
          JOIN orders o ON o.id = p.order_id
@@ -160,6 +174,12 @@ paymentsRouter.get('/export.csv', async (req, res, next) => {
       )
     ).rows;
 
+    const methodLabel: Record<string, string> = {
+      CASH: 'Tunai',
+      QRIS: 'QRIS Statis',
+      QRIS_DYNAMIC: 'QRIS Otomatis (Bruto)',
+    };
+
     const header = [
       'ID Pembayaran',
       'ID Pesanan',
@@ -168,8 +188,12 @@ paymentsRouter.get('/export.csv', async (req, res, next) => {
       'Sumber',
       'Status Pesanan',
       'Metode',
+      'Penyedia',
+      'Lingkungan',
+      'ID Order Penyedia',
+      'Status Rekonsiliasi',
       'Status Pembayaran',
-      'Jumlah (Rp)',
+      'Nominal Bruto (Rp)',
       'Tunai Diterima (Rp)',
       'Kembalian (Rp)',
       'Waktu Lunas (WIB)',
@@ -184,13 +208,17 @@ paymentsRouter.get('/export.csv', async (req, res, next) => {
         p.customerName,
         p.orderSource,
         p.orderStatus,
-        p.method === 'CASH' ? 'Tunai' : p.method,
+        methodLabel[p.method] ?? p.method,
+        p.provider ?? 'INTERNAL',
+        p.environment === 'SANDBOX' ? 'SANDBOX (Simulasi)' : 'PRODUKSI',
+        p.providerOrderId ?? '',
+        p.reconciliationStatus ?? '',
         p.status,
         p.amount,
         p.cashReceived ?? '',
         p.changeAmount ?? '',
         formatWibCsv(p.paidAt),
-        p.verifiedByName ?? '',
+        p.verifiedByName ?? (p.provider === 'MIDTRANS' ? 'Midtrans Status API' : ''),
       ]
         .map(sanitizeCsvCell)
         .join(','),
@@ -214,7 +242,11 @@ paymentsRouter.get('/pending', async (req, res, next) => {
       `SELECT o.id, o.customer_name "customerName", o.total_amount "totalAmount",
               o.created_at "createdAt", o.order_type "orderType",
               o.fulfillment_method "fulfillmentMethod", o.order_source "orderSource",
-              t.name "tableName", p.method, p.status,
+              t.name "tableName", p.method, p.provider, p.environment,
+              p.provider_order_id "providerOrderId", p.provider_status "providerStatus",
+              p.reconciliation_status "reconciliationStatus",
+              p.qr_string "qrString", p.qr_image_url "qrImageUrl", p.expires_at "expiresAt",
+              p.status,
               COALESCE((
                 SELECT json_agg(
                   json_build_object(
@@ -240,6 +272,20 @@ paymentsRouter.get('/pending', async (req, res, next) => {
   }
 });
 
+paymentsRouter.post('/:orderId/reconcile', allowRoles('MERCHANT_OWNER', 'CASHIER'), async (req, res, next) => {
+  try {
+    if (!isUuid(req.params.orderId)) return res.status(404).json({ error: 'Pesanan tidak ditemukan' });
+    const reconciled = await reconcileOrderDynamicPayment({
+      orderId: req.params.orderId,
+      merchantId: req.auth!.merchantId,
+      outletId: req.auth!.outletId,
+    });
+    res.json(reconciled);
+  } catch (e) {
+    next(e);
+  }
+});
+
 paymentsRouter.post('/:orderId/confirm', allowRoles('MERCHANT_OWNER', 'CASHIER'), async (req, res, next) => {
   try {
     if (!isUuid(req.params.orderId)) return res.status(404).json({ error: 'Pesanan tidak ditemukan' });
@@ -250,13 +296,20 @@ paymentsRouter.post('/:orderId/confirm', allowRoles('MERCHANT_OWNER', 'CASHIER')
       await c.query('BEGIN');
       const order = (
         await c.query(
-          'SELECT o.id,o.total_amount,o.order_status,o.tracking_token_hash,p.id payment_id,p.method,p.status FROM orders o JOIN payments p ON p.order_id=o.id WHERE o.id=$1 AND o.merchant_id=$2 AND o.outlet_id=$3 FOR UPDATE',
+          'SELECT o.id,o.total_amount,o.order_status,o.tracking_token_hash,p.id payment_id,p.method,p.provider,p.status FROM orders o JOIN payments p ON p.order_id=o.id WHERE o.id=$1 AND o.merchant_id=$2 AND o.outlet_id=$3 FOR UPDATE',
           [req.params.orderId, req.auth!.merchantId, req.auth!.outletId],
         )
       ).rows[0];
       if (!order) {
         await c.query('ROLLBACK');
         return res.status(404).json({ error: 'Pesanan tidak ditemukan' });
+      }
+      if (order.method === 'QRIS_DYNAMIC' || order.provider === 'MIDTRANS') {
+        await c.query('ROLLBACK');
+        return res.status(409).json({
+          error:
+            'Pembayaran QRIS Otomatis hanya dapat diverifikasi secara otoritatif melalui Midtrans, bukan konfirmasi manual.',
+        });
       }
       if (order.status === 'PAID') {
         await c.query('COMMIT');

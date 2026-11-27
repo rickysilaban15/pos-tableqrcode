@@ -6,6 +6,8 @@ import { allowRoles, isUuid, requireAuth, requireMerchantContext } from '../../m
 import { getMerchantEntitlements } from '../../middleware/entitlement.ts';
 import { sanitizeCsvCell } from '../../middleware/security.ts';
 import { publishTenantEvent, publishTrackingEvent, subscribeTrackingEvents } from '../events/bus.ts';
+import { isMerchantEligibleForDynamicQris } from '../payments/midtrans.ts';
+import { reconcileOrderDynamicPayment } from '../payments/reconcile.ts';
 import { createCheckoutOrder, expireAbandonedOrders } from './service.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -22,18 +24,21 @@ const item = z.object({
 const body = z.object({
   customerName: z.string().trim().min(1).max(80),
   idempotencyKey: z.string().uuid(),
-  paymentMethod: z.enum(['CASH', 'QRIS']),
+  paymentMethod: z.enum(['CASH', 'QRIS', 'QRIS_DYNAMIC']),
   items: z.array(item).min(1).max(50),
   orderType: z.enum(['DINE_IN', 'TAKEAWAY']).default('DINE_IN'),
   fulfillmentMethod: z.enum(['TABLE_SERVICE', 'PICKUP_COUNTER']).default('TABLE_SERVICE'),
 });
 
 type OutletPolicy = {
+  merchant_id?: string;
+  merchant_slug?: string;
   is_open: boolean;
   enable_dine_in: boolean;
   enable_takeaway: boolean;
   enable_table_service: boolean;
   enable_pickup_counter: boolean;
+  enable_dynamic_qris?: boolean;
   qris_image_url: string;
 };
 
@@ -59,6 +64,16 @@ function validateOutletPolicy(
   }
   if (input.paymentMethod === 'QRIS' && !policy.qris_image_url.trim()) {
     return { status: 400, error: 'QRIS belum dikonfigurasi outlet' };
+  }
+  if (input.paymentMethod === 'QRIS_DYNAMIC') {
+    const check = isMerchantEligibleForDynamicQris(
+      policy.merchant_id ?? '',
+      policy.merchant_slug ?? '',
+      policy.enable_dynamic_qris ?? true,
+    );
+    if (!check.eligible) {
+      return { status: 400, error: check.reason || 'QRIS Otomatis belum tersedia untuk outlet ini' };
+    }
   }
   return null;
 }
@@ -89,6 +104,7 @@ function buildHistoryWhere(
   const status = typeof query.status === 'string' ? query.status : 'READY_TO_SERVE';
   const source = typeof query.source === 'string' ? query.source : 'ALL';
   const method = typeof query.method === 'string' ? query.method : 'ALL';
+  const environment = typeof query.environment === 'string' ? query.environment : 'ALL';
   const q = typeof query.q === 'string' ? query.q.trim() : '';
   const dateFrom = typeof query.dateFrom === 'string' ? query.dateFrom.trim() : '';
   const dateTo = typeof query.dateTo === 'string' ? query.dateTo.trim() : '';
@@ -114,10 +130,14 @@ function buildHistoryWhere(
     params.push(method);
     filters.push(`p.method = $${params.length}`);
   }
+  if (environment !== 'ALL') {
+    params.push(environment);
+    filters.push(`COALESCE(p.environment, 'PRODUCTION') = $${params.length}`);
+  }
   if (q) {
     params.push(`%${q}%`);
     filters.push(
-      `(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length} OR COALESCE(t.name,'') ILIKE $${params.length})`,
+      `(o.id::text ILIKE $${params.length} OR o.customer_name ILIKE $${params.length} OR COALESCE(t.name,'') ILIKE $${params.length} OR COALESCE(p.provider_order_id,'') ILIKE $${params.length})`,
     );
   }
   if (dateFrom) {
@@ -143,7 +163,7 @@ publicOrdersRouter.post('/qr/:token/orders', async (req, res, next) => {
     const input = body.parse(req.body);
     const qrContext = (
       await db.query(
-        "SELECT t.id,t.merchant_id,t.outlet_id,COALESCE(s.is_open,true) is_open,COALESCE(s.enable_dine_in,true) enable_dine_in,COALESCE(s.enable_takeaway,true) enable_takeaway,COALESCE(s.enable_table_service,true) enable_table_service,COALESCE(s.enable_pickup_counter,true) enable_pickup_counter,COALESCE(s.qris_image_url,'') qris_image_url FROM table_qr_codes q JOIN dining_tables t ON t.id=q.table_id LEFT JOIN outlet_settings s ON s.outlet_id=t.outlet_id WHERE q.token_hash=$1 AND q.revoked_at IS NULL AND t.is_active=true",
+        "SELECT t.id,t.merchant_id,m.slug merchant_slug,t.outlet_id,COALESCE(s.is_open,true) is_open,COALESCE(s.enable_dine_in,true) enable_dine_in,COALESCE(s.enable_takeaway,true) enable_takeaway,COALESCE(s.enable_table_service,true) enable_table_service,COALESCE(s.enable_pickup_counter,true) enable_pickup_counter,COALESCE(s.enable_dynamic_qris,true) enable_dynamic_qris,COALESCE(s.qris_image_url,'') qris_image_url FROM table_qr_codes q JOIN dining_tables t ON t.id=q.table_id JOIN merchants m ON m.id=t.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=t.outlet_id WHERE q.token_hash=$1 AND q.revoked_at IS NULL AND t.is_active=true",
         [hash(req.params.token)],
       )
     ).rows[0];
@@ -185,7 +205,7 @@ publicOrdersRouter.get('/tracking/:token', async (req, res, next) => {
     await expireAbandonedOrders(o.outletId).catch(() => 0);
     const refreshed = (
       await pool.query(
-        'SELECT o.id,o.customer_name "customerName",o.total_amount "totalAmount",o.order_status "orderStatus",o.payment_status "paymentStatus",o.order_type "orderType",o.fulfillment_method "fulfillmentMethod",o.order_source "orderSource",o.created_at "createdAt",o.updated_at "updatedAt",o.completed_at "completedAt",t.name "tableName",q.public_token "tableQrToken",p.method "paymentMethod",p.cash_received "cashReceived",p.change_amount "changeAmount",p.paid_at "paidAt",m.name "merchantName",out.name "outletName",COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl" FROM orders o JOIN payments p ON p.order_id=o.id JOIN merchants m ON m.id=o.merchant_id JOIN outlets out ON out.id=o.outlet_id LEFT JOIN outlet_settings s ON s.outlet_id=o.outlet_id LEFT JOIN dining_tables t ON t.id=o.table_id LEFT JOIN LATERAL (SELECT public_token FROM table_qr_codes WHERE table_id = t.id AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1) q ON true WHERE o.id=$1',
+        'SELECT o.id,o.customer_name "customerName",o.total_amount "totalAmount",o.order_status "orderStatus",o.payment_status "paymentStatus",o.order_type "orderType",o.fulfillment_method "fulfillmentMethod",o.order_source "orderSource",o.created_at "createdAt",o.updated_at "updatedAt",o.completed_at "completedAt",t.name "tableName",q.public_token "tableQrToken",p.method "paymentMethod",p.provider "paymentProvider",p.environment "paymentEnvironment",p.provider_order_id "providerOrderId",p.provider_status "providerStatus",p.qr_string "qrString",p.qr_image_url "qrImageUrl",p.expires_at "paymentExpiresAt",p.reconciliation_status "reconciliationStatus",p.cash_received "cashReceived",p.change_amount "changeAmount",p.paid_at "paidAt",m.name "merchantName",out.name "outletName",COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl" FROM orders o JOIN payments p ON p.order_id=o.id JOIN merchants m ON m.id=o.merchant_id JOIN outlets out ON out.id=o.outlet_id LEFT JOIN outlet_settings s ON s.outlet_id=o.outlet_id LEFT JOIN dining_tables t ON t.id=o.table_id LEFT JOIN LATERAL (SELECT public_token FROM table_qr_codes WHERE table_id = t.id AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 1) q ON true WHERE o.id=$1',
         [o.id],
       )
     ).rows[0];
@@ -196,6 +216,17 @@ publicOrdersRouter.get('/tracking/:token', async (req, res, next) => {
       )
     ).rows;
     res.json({ ...refreshed, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+publicOrdersRouter.post('/tracking/:token/reconcile', async (req, res, next) => {
+  try {
+    if (!pool) throw Error('Database tidak tersedia');
+    const tokenHash = hash(req.params.token);
+    const reconciled = await reconcileOrderDynamicPayment({ trackingTokenHash: tokenHash });
+    res.json(reconciled);
   } catch (e) {
     next(e);
   }
@@ -263,7 +294,7 @@ merchantOrdersRouter.post('/manual', allowRoles('MERCHANT_OWNER', 'CASHIER'), as
 
     const policy = (
       await db.query(
-        "SELECT COALESCE(s.is_open,true) is_open,COALESCE(s.enable_dine_in,true) enable_dine_in,COALESCE(s.enable_takeaway,true) enable_takeaway,COALESCE(s.enable_table_service,true) enable_table_service,COALESCE(s.enable_pickup_counter,true) enable_pickup_counter,COALESCE(s.qris_image_url,'') qris_image_url FROM outlets o LEFT JOIN outlet_settings s ON s.outlet_id=o.id WHERE o.id=$1 AND o.merchant_id=$2",
+        "SELECT o.merchant_id,m.slug merchant_slug,COALESCE(s.is_open,true) is_open,COALESCE(s.enable_dine_in,true) enable_dine_in,COALESCE(s.enable_takeaway,true) enable_takeaway,COALESCE(s.enable_table_service,true) enable_table_service,COALESCE(s.enable_pickup_counter,true) enable_pickup_counter,COALESCE(s.enable_dynamic_qris,true) enable_dynamic_qris,COALESCE(s.qris_image_url,'') qris_image_url FROM outlets o JOIN merchants m ON m.id=o.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=o.id WHERE o.id=$1 AND o.merchant_id=$2",
         [req.auth!.outletId, req.auth!.merchantId],
       )
     ).rows[0];
@@ -313,9 +344,12 @@ merchantOrdersRouter.get('/dashboard', async (req, res, next) => {
            count(*) FILTER (WHERE o.order_status = 'NEW_ORDER' AND o.payment_status = 'PAID')::int "newOrders",
            count(*) FILTER (WHERE o.order_status = 'IN_PROGRESS' AND o.payment_status = 'PAID')::int "inProgressOrders",
            count(*) FILTER (WHERE o.order_status = 'READY_TO_SERVE' AND o.completed_at >= jkt.start_of_day)::int "readyOrders",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND o.created_at >= jkt.start_of_day), 0)::int revenue,
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND o.created_at >= jkt.start_of_day), 0)::int revenue,
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX' AND o.created_at >= jkt.start_of_day), 0)::int "sandboxGrossToday",
+           count(*) FILTER (WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX' AND o.created_at >= jkt.start_of_day)::int "sandboxOrdersToday",
            count(*) FILTER (WHERE o.payment_status = 'PAID')::int "allTimePaidOrders"
          FROM orders o
+         JOIN payments p ON p.order_id = o.id
          CROSS JOIN jkt
          WHERE o.merchant_id = $1 AND o.outlet_id = $2`,
         params,
@@ -325,7 +359,7 @@ merchantOrdersRouter.get('/dashboard', async (req, res, next) => {
                 o.order_status "orderStatus", o.payment_status "paymentStatus",
                 o.created_at "createdAt", o.order_type "orderType",
                 o.fulfillment_method "fulfillmentMethod", o.order_source "orderSource",
-                t.name "tableName", p.method,
+                t.name "tableName", p.method, p.environment,
                 (SELECT coalesce(sum(quantity),0)::int FROM order_items WHERE order_id = o.id) "itemCount"
          FROM orders o
          JOIN payments p ON p.order_id = o.id
@@ -394,7 +428,8 @@ merchantOrdersRouter.get('/', async (req, res, next) => {
               o.order_status "orderStatus", o.payment_status "paymentStatus",
               o.created_at "createdAt", o.order_type "orderType",
               o.fulfillment_method "fulfillmentMethod", o.order_source "orderSource",
-              t.name "tableName", p.method,
+              t.name "tableName", p.method, p.provider, p.environment,
+              p.provider_order_id "providerOrderId", p.reconciliation_status "reconciliationStatus",
               COALESCE((
                 SELECT json_agg(
                   json_build_object(
@@ -439,6 +474,8 @@ merchantOrdersRouter.get('/history', async (req, res, next) => {
                 o.order_status "orderStatus", o.payment_status "paymentStatus",
                 o.order_type "orderType", o.fulfillment_method "fulfillmentMethod",
                 o.order_source "orderSource", t.name "tableName", p.method,
+                p.provider, p.environment, p.provider_order_id "providerOrderId",
+                p.reconciliation_status "reconciliationStatus",
                 p.cash_received "cashReceived", p.change_amount "changeAmount",
                 p.paid_at "paidAt", o.created_at "createdAt", o.completed_at "completedAt",
                 (SELECT coalesce(sum(quantity),0)::int FROM order_items WHERE order_id=o.id) "itemCount"
@@ -453,14 +490,17 @@ merchantOrdersRouter.get('/history', async (req, res, next) => {
       pool.query(
         `SELECT
            count(*)::int "totalMatching",
-           count(*) FILTER (WHERE o.payment_status = 'PAID')::int "paidOrders",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID'), 0)::int "paidRevenue",
-           count(*) FILTER (WHERE o.payment_status = 'PAID' AND o.order_source = 'QR')::int "qrOrders",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND o.order_source = 'QR'), 0)::int "qrRevenue",
-           count(*) FILTER (WHERE o.payment_status = 'PAID' AND o.order_source = 'POS')::int "posOrders",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND o.order_source = 'POS'), 0)::int "posRevenue",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND p.method = 'CASH'), 0)::int "cashRevenue",
-           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND p.method = 'QRIS'), 0)::int "qrisRevenue"
+           count(*) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX')::int "paidOrders",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX'), 0)::int "paidRevenue",
+           count(*) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND o.order_source = 'QR')::int "qrOrders",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND o.order_source = 'QR'), 0)::int "qrRevenue",
+           count(*) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND o.order_source = 'POS')::int "posOrders",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND o.order_source = 'POS'), 0)::int "posRevenue",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND p.method = 'CASH'), 0)::int "cashRevenue",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND p.method = 'QRIS'), 0)::int "qrisRevenue",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX' AND p.method = 'QRIS_DYNAMIC'), 0)::int "qrisDynamicGross",
+           count(*) FILTER (WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX')::int "sandboxPaidOrders",
+           coalesce(sum(o.total_amount) FILTER (WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX'), 0)::int "sandboxGrossVolume"
          FROM orders o
          JOIN payments p ON p.order_id = o.id
          LEFT JOIN dining_tables t ON t.id = o.table_id
@@ -499,7 +539,8 @@ merchantOrdersRouter.get('/history/export.csv', async (req, res, next) => {
                 o.customer_name "customerName", o.order_type "orderType",
                 o.order_source "orderSource", t.name "tableName",
                 o.order_status "orderStatus", o.payment_status "paymentStatus",
-                p.method, o.total_amount "totalAmount",
+                p.method, p.provider, p.environment, p.provider_order_id "providerOrderId",
+                o.total_amount "totalAmount",
                 p.cash_received "cashReceived", p.change_amount "changeAmount",
                 p.paid_at "paidAt"
          FROM orders o
@@ -528,6 +569,11 @@ merchantOrdersRouter.get('/history/export.csv', async (req, res, next) => {
       FAILED: 'Gagal',
       EXPIRED: 'Kedaluwarsa',
     };
+    const methodLabel: Record<string, string> = {
+      CASH: 'Tunai',
+      QRIS: 'QRIS Statis',
+      QRIS_DYNAMIC: 'QRIS Otomatis (Bruto)',
+    };
 
     const header = [
       'ID Pesanan',
@@ -539,7 +585,10 @@ merchantOrdersRouter.get('/history/export.csv', async (req, res, next) => {
       'Status Pesanan',
       'Status Bayar',
       'Metode',
-      'Total (Rp)',
+      'Penyedia',
+      'Lingkungan',
+      'ID Transaksi Penyedia',
+      'Total Bruto (Rp)',
       'Tunai Diterima (Rp)',
       'Kembalian (Rp)',
       'Waktu Lunas (WIB)',
@@ -555,7 +604,10 @@ merchantOrdersRouter.get('/history/export.csv', async (req, res, next) => {
         o.tableName ?? '',
         statusLabel[o.orderStatus] ?? o.orderStatus,
         payLabel[o.paymentStatus] ?? o.paymentStatus,
-        o.method === 'CASH' ? 'Tunai' : o.method,
+        methodLabel[o.method] ?? o.method,
+        o.provider ?? 'INTERNAL',
+        o.environment === 'SANDBOX' ? 'SANDBOX (Simulasi)' : 'PRODUKSI',
+        o.providerOrderId ?? '',
         o.totalAmount,
         o.cashReceived ?? '',
         o.changeAmount ?? '',
@@ -581,7 +633,7 @@ merchantOrdersRouter.get('/:id/receipt', async (req, res, next) => {
     if (!pool) throw Error('Database tidak tersedia');
     const order = (
       await pool.query(
-        'SELECT o.id,o.customer_name "customerName",o.total_amount "totalAmount",o.order_status "orderStatus",o.payment_status "paymentStatus",o.created_at "createdAt",o.completed_at "completedAt",o.order_type "orderType",o.fulfillment_method "fulfillmentMethod",o.order_source "orderSource",t.name "tableName",p.method,p.cash_received "cashReceived",p.change_amount "changeAmount",p.paid_at "paidAt",m.name "merchantName",out.name "outletName",COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl" FROM orders o JOIN payments p ON p.order_id=o.id JOIN merchants m ON m.id=o.merchant_id JOIN outlets out ON out.id=o.outlet_id LEFT JOIN outlet_settings s ON s.outlet_id=o.outlet_id LEFT JOIN dining_tables t ON t.id=o.table_id WHERE o.id=$1 AND o.merchant_id=$2 AND o.outlet_id=$3',
+        'SELECT o.id,o.customer_name "customerName",o.total_amount "totalAmount",o.order_status "orderStatus",o.payment_status "paymentStatus",o.created_at "createdAt",o.completed_at "completedAt",o.order_type "orderType",o.fulfillment_method "fulfillmentMethod",o.order_source "orderSource",t.name "tableName",p.method,p.provider "paymentProvider",p.environment "paymentEnvironment",p.provider_order_id "providerOrderId",p.provider_transaction_id "providerTransactionId",p.reconciliation_status "reconciliationStatus",p.cash_received "cashReceived",p.change_amount "changeAmount",p.paid_at "paidAt",m.name "merchantName",out.name "outletName",COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl" FROM orders o JOIN payments p ON p.order_id=o.id JOIN merchants m ON m.id=o.merchant_id JOIN outlets out ON out.id=o.outlet_id LEFT JOIN outlet_settings s ON s.outlet_id=o.outlet_id LEFT JOIN dining_tables t ON t.id=o.table_id WHERE o.id=$1 AND o.merchant_id=$2 AND o.outlet_id=$3',
         [req.params.id, req.auth!.merchantId, req.auth!.outletId],
       )
     ).rows[0];

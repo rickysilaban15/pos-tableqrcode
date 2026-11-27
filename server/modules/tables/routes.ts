@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { pool } from '../../database/client.ts';
 import { allowRoles, isUuid, requireAuth, requireMerchantContext } from '../../middleware/auth.ts';
 import { getMerchantEntitlements } from '../../middleware/entitlement.ts';
+import { isMerchantEligibleForDynamicQris } from '../payments/midtrans.ts';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const token = () => randomBytes(32).toString('base64url');
@@ -220,13 +221,18 @@ publicTablesRouter.get('/qr/:token/menu', async (req, res, next) => {
     if (!pool) throw Error('Database tidak tersedia');
     const ctx = (
       await pool.query(
-        'SELECT t.id,t.merchant_id,t.outlet_id,t.name table_name,m.name merchant_name,COALESCE(s.description,\'\') description,COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl",COALESCE(s.operating_hours,\'\') "operatingHours",COALESCE(s.is_open,true) "isOpen",COALESCE(s.enable_dine_in,true) "enableDineIn",COALESCE(s.enable_takeaway,true) "enableTakeaway",COALESCE(s.enable_table_service,true) "enableTableService",COALESCE(s.enable_pickup_counter,true) "enablePickupCounter",COALESCE(s.qris_image_url,\'\') "qrisImageUrl" FROM table_qr_codes q JOIN dining_tables t ON t.id=q.table_id JOIN merchants m ON m.id=t.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=t.outlet_id WHERE q.token_hash=$1 AND q.revoked_at IS NULL AND t.is_active',
+        'SELECT t.id,t.merchant_id,m.slug merchant_slug,t.outlet_id,t.name table_name,m.name merchant_name,COALESCE(s.description,\'\') description,COALESCE(s.address,\'\') address,COALESCE(s.whatsapp,\'\') whatsapp,COALESCE(s.logo_url,\'\') "logoUrl",COALESCE(s.operating_hours,\'\') "operatingHours",COALESCE(s.is_open,true) "isOpen",COALESCE(s.enable_dine_in,true) "enableDineIn",COALESCE(s.enable_takeaway,true) "enableTakeaway",COALESCE(s.enable_table_service,true) "enableTableService",COALESCE(s.enable_pickup_counter,true) "enablePickupCounter",COALESCE(s.enable_dynamic_qris,true) "enableDynamicQris",COALESCE(s.qris_image_url,\'\') "qrisImageUrl" FROM table_qr_codes q JOIN dining_tables t ON t.id=q.table_id JOIN merchants m ON m.id=t.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=t.outlet_id WHERE q.token_hash=$1 AND q.revoked_at IS NULL AND t.is_active',
         [hash(req.params.token)],
       )
     ).rows[0];
     if (!ctx) return res.status(404).json({ error: 'QR meja tidak valid atau tidak aktif' });
     const entitlement = await getMerchantEntitlements(ctx.merchant_id);
     const effectiveOpen = ctx.isOpen && entitlement.effectiveActive && entitlement.qrOrderingEnabled;
+    const dynamicQrisCheck = isMerchantEligibleForDynamicQris(
+      ctx.merchant_id,
+      ctx.merchant_slug ?? '',
+      Boolean(ctx.enableDynamicQris),
+    );
     const [categories, products] = await Promise.all([
       pool.query(
         'SELECT id,name,sort_order "sortOrder" FROM categories WHERE merchant_id=$1 AND outlet_id=$2 AND is_active ORDER BY sort_order,name',
@@ -265,6 +271,9 @@ publicTablesRouter.get('/qr/:token/menu', async (req, res, next) => {
         enableTakeaway: ctx.enableTakeaway,
         enableTableService: ctx.enableTableService,
         enablePickupCounter: ctx.enablePickupCounter,
+        enableDynamicQris: Boolean(ctx.enableDynamicQris),
+        dynamicQrisAvailable: dynamicQrisCheck.eligible,
+        dynamicQrisEnvironment: 'SANDBOX',
         qrisImageUrl: ctx.qrisImageUrl,
       },
       categories: categories.rows,

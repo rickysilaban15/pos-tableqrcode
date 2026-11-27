@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { pool } from '../../database/client.ts';
 import { publishTenantEvent, publishTrackingEvent } from '../events/bus.ts';
+import { chargeMidtransDynamicQris } from '../payments/midtrans.ts';
 
 export type CheckoutItem = {
   productId: string;
@@ -13,7 +14,7 @@ export type CheckoutItem = {
 export type CheckoutInput = {
   customerName: string;
   idempotencyKey: string;
-  paymentMethod: 'CASH' | 'QRIS';
+  paymentMethod: 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
   items: CheckoutItem[];
   orderType: 'DINE_IN' | 'TAKEAWAY';
   fulfillmentMethod: 'TABLE_SERVICE' | 'PICKUP_COUNTER';
@@ -32,11 +33,24 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 export async function createCheckoutOrder(
   input: CheckoutInput,
   context: OrderContext,
-  options: { confirmCash?: number; verifiedBy?: string } = {},
+  options: { confirmCash?: number; verifiedBy?: string; rawEnv?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
 ) {
   if (!pool) throw Error('Database tidak tersedia');
   const requestHash = hash(JSON.stringify(input));
   const client = await pool.connect();
+
+  let createdOrder: {
+    id: string;
+    totalAmount: number;
+    orderStatus: string;
+    paymentStatus: string;
+    orderSource: string;
+  } | null = null;
+  let paymentId: string | null = null;
+  let providerOrderId: string | null = null;
+  let trackingToken = '';
+  let chargeLines: { id: string; name: string; price: number; quantity: number }[] = [];
+
   try {
     await client.query('BEGIN');
     // Serialize concurrent retries with the same outlet + idempotencyKey.
@@ -48,13 +62,20 @@ export async function createCheckoutOrder(
       await client.query(
         `SELECT o.id, o.total_amount "totalAmount", o.order_status "orderStatus",
                 o.payment_status "paymentStatus", o.order_source "orderSource",
-                o.request_hash, p.change_amount "changeAmount"
+                o.request_hash,
+                p.method "paymentMethod", p.provider, p.environment,
+                p.provider_order_id "providerOrderId",
+                p.provider_transaction_id "providerTransactionId",
+                p.qr_string "qrString", p.qr_image_url "qrImageUrl",
+                p.acquirer, p.expires_at "expiresAt",
+                p.change_amount "changeAmount"
          FROM orders o
          LEFT JOIN payments p ON p.order_id = o.id
          WHERE o.outlet_id = $1 AND o.idempotency_key = $2`,
         [context.outletId, input.idempotencyKey],
       )
     ).rows[0];
+
     if (existing) {
       await client.query('COMMIT');
       if (existing.request_hash !== requestHash) {
@@ -62,10 +83,39 @@ export async function createCheckoutOrder(
           status: 409,
         });
       }
-      const { request_hash: _rh, changeAmount, ...rest } = existing;
+      const {
+        request_hash: _rh,
+        changeAmount,
+        paymentMethod,
+        provider,
+        environment,
+        providerOrderId: existingProviderOrderId,
+        providerTransactionId,
+        qrString,
+        qrImageUrl,
+        acquirer,
+        expiresAt,
+        ...rest
+      } = existing;
       return {
         ...rest,
+        paymentMethod,
         change: changeAmount !== null && changeAmount !== undefined ? Number(changeAmount) : undefined,
+        ...(paymentMethod === 'QRIS_DYNAMIC'
+          ? {
+              payment: {
+                method: 'QRIS_DYNAMIC' as const,
+                provider: provider ?? 'MIDTRANS',
+                environment: environment ?? 'SANDBOX',
+                providerOrderId: existingProviderOrderId ?? null,
+                providerTransactionId: providerTransactionId ?? null,
+                qrString: qrString ?? null,
+                qrImageUrl: qrImageUrl ?? null,
+                acquirer: acquirer ?? 'gopay',
+                expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+              },
+            }
+          : {}),
         idempotent: true,
       };
     }
@@ -156,6 +206,10 @@ export async function createCheckoutOrder(
       });
     }
 
+    if (total <= 0) {
+      throw Object.assign(Error('Total pesanan harus lebih dari Rp0'), { status: 400 });
+    }
+
     const paid = input.paymentMethod === 'CASH' && options.confirmCash !== undefined;
     if (paid) {
       if (options.confirmCash! < total) {
@@ -165,6 +219,8 @@ export async function createCheckoutOrder(
         throw Object.assign(Error('Nominal tunai melebihi batas maksimum transaksi'), { status: 400 });
       }
     }
+
+    const isDynamicQris = input.paymentMethod === 'QRIS_DYNAMIC';
     const paymentStatus = paid
       ? 'PAID'
       : input.paymentMethod === 'QRIS'
@@ -172,8 +228,8 @@ export async function createCheckoutOrder(
         : 'UNPAID';
     const orderStatus = paid ? 'NEW_ORDER' : 'AWAITING_PAYMENT';
     const orderSource = context.orderSource ?? 'QR';
-    const expiresAt = paid ? null : new Date(Date.now() + 30 * 60_000);
-    const trackingToken = randomBytes(32).toString('base64url');
+    const expiresAt = paid ? null : new Date(Date.now() + (isDynamicQris ? 15 * 60_000 : 30 * 60_000));
+    trackingToken = randomBytes(32).toString('base64url');
     const changeAmount = paid ? options.confirmCash! - total : null;
 
     const order = (
@@ -197,6 +253,7 @@ export async function createCheckoutOrder(
         ],
       )
     ).rows[0];
+
     for (const line of lines) {
       await client.query(
         'INSERT INTO order_items(order_id,product_id,product_name,unit_price,quantity,selections)VALUES($1,$2,$3,$4,$5,$6)',
@@ -210,35 +267,184 @@ export async function createCheckoutOrder(
         ],
       );
     }
-    await client.query(
-      "INSERT INTO payments(order_id,method,status,amount,cash_received,change_amount,verified_by,paid_at)VALUES($1,$2,$3,$4,$5,$6,$7,CASE WHEN $3='PAID' THEN now() ELSE NULL END)",
+
+    const provider = isDynamicQris
+      ? 'MIDTRANS'
+      : input.paymentMethod === 'QRIS'
+        ? 'MANUAL_STATIC'
+        : 'INTERNAL';
+    const environment = isDynamicQris ? 'SANDBOX' : 'PRODUCTION';
+    const reconciliationStatus = isDynamicQris ? 'PENDING' : 'NOT_APPLICABLE';
+    providerOrderId = isDynamicQris
+      ? `WKP-ORD-${order.id.slice(0, 8).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`
+      : null;
+
+    const insertedPayment = (
+      await client.query(
+        `INSERT INTO payments(
+           order_id, merchant_id, outlet_id, method, provider, provider_order_id, provider_status,
+           status, amount, expected_gross_amount, currency, environment, reconciliation_status,
+           expires_at, cash_received, change_amount, verified_by, paid_at
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'IDR',$11,$12,$13,$14,$15,$16,CASE WHEN $8='PAID' THEN now() ELSE NULL END)
+         RETURNING id`,
+        [
+          order.id,
+          context.merchantId,
+          context.outletId,
+          input.paymentMethod,
+          provider,
+          providerOrderId,
+          isDynamicQris ? 'initiating' : null,
+          paymentStatus,
+          total,
+          total,
+          environment,
+          reconciliationStatus,
+          expiresAt,
+          paid ? options.confirmCash! : null,
+          changeAmount,
+          paid ? (options.verifiedBy ?? null) : null,
+        ],
+      )
+    ).rows[0];
+
+    await client.query('COMMIT');
+
+    createdOrder = order;
+    paymentId = insertedPayment.id;
+    chargeLines = lines.map((line, idx) => ({
+      id: `${line.product.id.slice(0, 8)}-${idx + 1}`,
+      name: line.product.name,
+      price: line.unit,
+      quantity: line.item.quantity,
+    }));
+
+    if (!isDynamicQris) {
+      publishTenantEvent({
+        type: 'order:created',
+        merchantId: context.merchantId,
+        outletId: context.outletId,
+        orderId: order.id,
+        orderStatus: order.orderStatus,
+        paymentStatus: order.paymentStatus,
+      });
+
+      return {
+        ...order,
+        paymentMethod: input.paymentMethod,
+        trackingToken,
+        change: paid ? changeAmount! : undefined,
+      };
+    }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  // Dynamic QRIS step 2: Call Midtrans Core API v2 OUTSIDE of any open DB transaction
+  try {
+    const charge = await chargeMidtransDynamicQris(
+      {
+        providerOrderId: providerOrderId!,
+        grossAmount: createdOrder!.totalAmount,
+        customerName: input.customerName,
+        items: chargeLines,
+        expiryMinutes: 15,
+      },
+      options.rawEnv ?? process.env,
+      options.fetchImpl ?? fetch,
+    );
+
+    await pool.query(
+      `UPDATE payments
+       SET provider_transaction_id = $1,
+           provider_status = $2,
+           qr_string = $3,
+           qr_image_url = $4,
+           acquirer = $5,
+           expires_at = $6,
+           provider_metadata = $7::jsonb,
+           updated_at = now()
+       WHERE id = $8`,
       [
-        order.id,
-        input.paymentMethod,
-        paymentStatus,
-        total,
-        paid ? options.confirmCash! : null,
-        changeAmount,
-        paid ? (options.verifiedBy ?? null) : null,
+        charge.providerTransactionId,
+        charge.providerStatus,
+        charge.qrString,
+        charge.qrImageUrl,
+        charge.acquirer,
+        charge.expiresAt,
+        JSON.stringify(charge.providerMetadata),
+        paymentId,
       ],
     );
-    await client.query('COMMIT');
+
+    await pool.query('UPDATE orders SET expires_at = $1, updated_at = now() WHERE id = $2', [
+      charge.expiresAt,
+      createdOrder!.id,
+    ]);
 
     publishTenantEvent({
       type: 'order:created',
       merchantId: context.merchantId,
       outletId: context.outletId,
-      orderId: order.id,
-      orderStatus: order.orderStatus,
-      paymentStatus: order.paymentStatus,
+      orderId: createdOrder!.id,
+      orderStatus: createdOrder!.orderStatus,
+      paymentStatus: createdOrder!.paymentStatus,
     });
 
-    return { ...order, trackingToken, change: paid ? changeAmount! : undefined };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
+    return {
+      ...createdOrder!,
+      paymentMethod: 'QRIS_DYNAMIC' as const,
+      trackingToken,
+      payment: {
+        method: 'QRIS_DYNAMIC' as const,
+        provider: 'MIDTRANS' as const,
+        environment: 'SANDBOX' as const,
+        providerOrderId: charge.providerOrderId,
+        providerTransactionId: charge.providerTransactionId,
+        qrString: charge.qrString,
+        qrImageUrl: charge.qrImageUrl,
+        acquirer: charge.acquirer,
+        expiresAt: charge.expiresAt.toISOString(),
+      },
+    };
+  } catch (chargeErr) {
+    // Cleanly mark failed initiation and release the original idempotency key so customer can retry safely
+    await pool
+      .query(
+        `UPDATE payments
+         SET status = 'FAILED',
+             provider_status = 'charge_failed',
+             reconciliation_status = 'FAILED',
+             provider_metadata = $1::jsonb,
+             updated_at = now()
+         WHERE id = $2`,
+        [
+          JSON.stringify({
+            initiationError: chargeErr instanceof Error ? chargeErr.message : 'Midtrans charge failed',
+          }),
+          paymentId,
+        ],
+      )
+      .catch(() => {});
+
+    await pool
+      .query(
+        `UPDATE orders
+         SET order_status = 'CANCELLED',
+             payment_status = 'FAILED',
+             cancelled_at = now(),
+             cancel_reason = 'Gagal menginisiasi pembayaran QRIS Otomatis',
+             idempotency_key = $1,
+             updated_at = now()
+         WHERE id = $2`,
+        [`${input.idempotencyKey}:failed:${createdOrder!.id.slice(0, 8)}`, createdOrder!.id],
+      )
+      .catch(() => {});
+
+    throw chargeErr;
   }
 }
 
@@ -264,7 +470,11 @@ export async function expireAbandonedOrders(outletId?: string): Promise<number> 
     if (expired.length > 0) {
       const ids = expired.map((row) => row.id);
       await client.query(
-        "UPDATE payments SET status = 'EXPIRED', updated_at = now() WHERE order_id = ANY($1::uuid[]) AND status IN ('UNPAID', 'PENDING_VERIFICATION')",
+        `UPDATE payments
+         SET status = 'EXPIRED',
+             reconciliation_status = CASE WHEN provider = 'MIDTRANS' THEN 'EXPIRED' ELSE reconciliation_status END,
+             updated_at = now()
+         WHERE order_id = ANY($1::uuid[]) AND status IN ('UNPAID', 'PENDING_VERIFICATION')`,
         [ids],
       );
     }

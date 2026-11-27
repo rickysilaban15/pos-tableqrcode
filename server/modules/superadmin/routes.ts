@@ -28,8 +28,10 @@ superAdminRouter.get('/overview', async (_req, res, next) => {
           (SELECT count(*)::int FROM latest_subs WHERE effective_status = 'ACTIVE') "activeSubscriptions",
           (SELECT count(*)::int FROM latest_subs WHERE effective_status = 'TRIAL') "trialSubscriptions",
           (SELECT count(*)::int FROM latest_subs WHERE effective_status IN ('EXPIRED','SUSPENDED','CANCELLED')) "inactiveSubscriptions",
-          (SELECT count(*)::int FROM orders WHERE payment_status = 'PAID') "totalPaidOrders",
-          (SELECT coalesce(sum(total_amount),0)::bigint FROM orders WHERE payment_status = 'PAID')::text "totalGmv",
+          (SELECT count(*)::int FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX') "totalPaidOrders",
+          (SELECT coalesce(sum(o.total_amount),0)::bigint FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.payment_status = 'PAID' AND COALESCE(p.environment, 'PRODUCTION') <> 'SANDBOX')::text "totalGmv",
+          (SELECT count(*)::int FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX') "sandboxPaidOrders",
+          (SELECT coalesce(sum(o.total_amount),0)::bigint FROM orders o JOIN payments p ON p.order_id = o.id WHERE o.payment_status = 'PAID' AND p.environment = 'SANDBOX')::text "sandboxGmv",
           (SELECT coalesce(sum(p.monthly_price),0)::int FROM latest_subs ls JOIN subscription_plans p ON p.id = ls.plan_id WHERE ls.effective_status = 'ACTIVE') "mrr"
       `),
       pool.query(`
@@ -48,8 +50,10 @@ superAdminRouter.get('/overview', async (_req, res, next) => {
           COALESCE(s.pos_enabled, false) "posEnabled",
           COALESCE(s.notes, '') "notes",
           p.code "planCode", p.name "planName", p.monthly_price "monthlyPrice",
-          (SELECT count(*)::int FROM orders o WHERE o.merchant_id = m.id AND o.payment_status = 'PAID') "paidOrders",
-          (SELECT coalesce(sum(o.total_amount),0)::int FROM orders o WHERE o.merchant_id = m.id AND o.payment_status = 'PAID') "paidRevenue"
+          (SELECT count(*)::int FROM orders o JOIN payments p2 ON p2.order_id = o.id WHERE o.merchant_id = m.id AND o.payment_status = 'PAID' AND COALESCE(p2.environment, 'PRODUCTION') <> 'SANDBOX') "paidOrders",
+          (SELECT coalesce(sum(o.total_amount),0)::int FROM orders o JOIN payments p2 ON p2.order_id = o.id WHERE o.merchant_id = m.id AND o.payment_status = 'PAID' AND COALESCE(p2.environment, 'PRODUCTION') <> 'SANDBOX') "paidRevenue",
+          (SELECT count(*)::int FROM orders o JOIN payments p2 ON p2.order_id = o.id WHERE o.merchant_id = m.id AND o.payment_status = 'PAID' AND p2.environment = 'SANDBOX') "sandboxPaidOrders",
+          (SELECT coalesce(sum(o.total_amount),0)::int FROM orders o JOIN payments p2 ON p2.order_id = o.id WHERE o.merchant_id = m.id AND o.payment_status = 'PAID' AND p2.environment = 'SANDBOX') "sandboxGrossVolume"
         FROM merchants m
         LEFT JOIN LATERAL (
           SELECT u.email, u.name
@@ -83,6 +87,7 @@ superAdminRouter.get('/overview', async (_req, res, next) => {
       metrics: {
         ...metrics.rows[0],
         totalGmv: Number(metrics.rows[0]?.totalGmv ?? 0),
+        sandboxGmv: Number(metrics.rows[0]?.sandboxGmv ?? 0),
       },
       merchants: merchants.rows,
       plans: plans.rows,

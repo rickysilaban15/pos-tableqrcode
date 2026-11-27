@@ -12,6 +12,8 @@ import { publicTablesRouter, tablesRouter } from './server/modules/tables/routes
 import { merchantOrdersRouter, publicOrdersRouter } from './server/modules/orders/routes.ts';
 import { expireAbandonedOrders } from './server/modules/orders/service.ts';
 import { paymentsRouter } from './server/modules/payments/routes.ts';
+import { midtransWebhookRouter } from './server/modules/payments/webhooks.ts';
+import { subscriptionBillingRouter } from './server/modules/subscriptions/routes.ts';
 import { settingsRouter } from './server/modules/settings/routes.ts';
 import { superAdminRouter } from './server/modules/superadmin/routes.ts';
 import { subscribeTenantEvents } from './server/modules/events/bus.ts';
@@ -54,11 +56,23 @@ export async function createApp() {
     max: process.env.NODE_ENV === 'test' ? 500 : 120,
     message: 'Terlalu banyak permintaan. Coba lagi sebentar.',
   });
+  const reconcileRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    max: process.env.NODE_ENV === 'test' ? 300 : 40,
+    message: 'Terlalu banyak pengecekan status pembayaran. Coba beberapa detik lagi.',
+  });
+  const webhookRateLimit = createRateLimiter({
+    windowMs: 60_000,
+    max: process.env.NODE_ENV === 'test' ? 500 : 180,
+    message: 'Terlalu banyak notifikasi webhook.',
+  });
 
   app.use('/api/auth/login', authRateLimit);
   app.use('/api/auth/register', authRateLimit);
   app.post('/api/public/qr/:token/orders', publicOrderRateLimit);
+  app.post('/api/public/tracking/:token/reconcile', reconcileRateLimit);
   app.use('/api/public', publicReadRateLimit);
+  app.use('/api/webhooks', webhookRateLimit, midtransWebhookRouter);
 
   // Operational health check endpoint (no sensitive env or legacy JSON exposure)
   app.get('/api/health', async (_req, res) => {
@@ -82,6 +96,7 @@ export async function createApp() {
   app.use('/api/public', publicOrdersRouter);
   app.use('/api/v1/orders', merchantOrdersRouter);
   app.use('/api/v1/payments', paymentsRouter);
+  app.use('/api/v1/subscription', subscriptionBillingRouter);
   app.use('/api/v1/settings', settingsRouter);
   app.use('/api/super-admin', superAdminRouter);
 
@@ -128,7 +143,7 @@ export async function createApp() {
         typeof (error as { status?: unknown })?.status === 'number'
           ? (error as { status: number }).status
           : 500;
-      if (status >= 500) {
+      if (status === 500) {
         console.error('API request failed:', error);
         res.status(500).json({ error: fallback });
         return;
@@ -140,6 +155,7 @@ export async function createApp() {
   app.use('/api/v1', handleApiError('Layanan data belum tersedia. Periksa konfigurasi server.'));
   app.use('/api/super-admin', handleApiError('Layanan super admin belum tersedia.'));
   app.use('/api/public', handleApiError('Layanan pemesanan tidak tersedia saat ini.'));
+  app.use('/api/webhooks', handleApiError('Pemrosesan webhook pembayaran mengalami kendala.'));
 
   return app;
 }

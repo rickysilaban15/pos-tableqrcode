@@ -4,6 +4,7 @@ import { pool } from '../../database/client.ts';
 import { allowRoles, requireAuth, requireMerchantContext } from '../../middleware/auth.ts';
 import { isSafeBaseUrl, isSafeImageOrUrl } from '../../middleware/security.ts';
 import { publishTenantEvent } from '../events/bus.ts';
+import { isMerchantEligibleForDynamicQris } from '../payments/midtrans.ts';
 
 const input = z
   .object({
@@ -31,6 +32,7 @@ const input = z
     enableTakeaway: z.boolean(),
     enableTableService: z.boolean(),
     enablePickupCounter: z.boolean(),
+    enableDynamicQris: z.boolean().optional().default(true),
     qrisImageUrl: z
       .string()
       .max(2_000_000)
@@ -47,7 +49,45 @@ const input = z
     }
   });
 
-const select = `SELECT m.name, o.slug, s.description, s.address, s.whatsapp, s.logo_url "logoUrl", s.operating_hours "operatingHours", s.is_open "isOpen", s.enable_dine_in "enableDineIn", s.enable_takeaway "enableTakeaway", s.enable_table_service "enableTableService", s.enable_pickup_counter "enablePickupCounter", s.qris_image_url "qrisImageUrl", s.qr_base_url "qrBaseUrl" FROM outlets o JOIN merchants m ON m.id=o.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=o.id WHERE o.id=$1 AND o.merchant_id=$2`;
+const select = `SELECT m.name, m.slug "merchantSlug", o.slug, s.description, s.address, s.whatsapp, s.logo_url "logoUrl", s.operating_hours "operatingHours", s.is_open "isOpen", s.enable_dine_in "enableDineIn", s.enable_takeaway "enableTakeaway", s.enable_table_service "enableTableService", s.enable_pickup_counter "enablePickupCounter", s.enable_dynamic_qris "enableDynamicQris", s.qris_image_url "qrisImageUrl", s.qr_base_url "qrBaseUrl" FROM outlets o JOIN merchants m ON m.id=o.merchant_id LEFT JOIN outlet_settings s ON s.outlet_id=o.id WHERE o.id=$1 AND o.merchant_id=$2`;
+
+function buildPaymentGatewayStatus(
+  merchantId: string,
+  merchantSlug: string,
+  enableDynamicQris: boolean,
+  qrisImageUrl: string,
+) {
+  const serverEligibility = isMerchantEligibleForDynamicQris(merchantId, merchantSlug, true);
+  const fullEligibility = isMerchantEligibleForDynamicQris(merchantId, merchantSlug, enableDynamicQris);
+  const { readiness } = serverEligibility;
+  const designatedRef = readiness.designatedMerchantRef?.toLowerCase() ?? '';
+  const merchantDesignated = Boolean(
+    designatedRef && (designatedRef === merchantId.toLowerCase() || designatedRef === merchantSlug.toLowerCase()),
+  );
+
+  const warnings: string[] = [];
+  for (const w of readiness.warnings) {
+    if (!warnings.includes(w)) warnings.push(w);
+  }
+  if (serverEligibility.reason && !warnings.includes(serverEligibility.reason)) {
+    warnings.unshift(serverEligibility.reason);
+  }
+
+  return {
+    provider: 'MIDTRANS' as const,
+    environment: readiness.environment.toUpperCase() as 'SANDBOX' | 'PRODUCTION',
+    sandboxOnlyEnforced: readiness.sandboxOnlyEnforced,
+    cashAvailable: true,
+    staticQrisConfigured: Boolean(qrisImageUrl.trim()),
+    dynamicQrisEligible: serverEligibility.eligible,
+    dynamicQrisEnabledByOutlet: enableDynamicQris,
+    dynamicQrisAvailable: fullEligibility.eligible,
+    connectionReady: readiness.ready,
+    merchantDesignated,
+    webhookConfigured: readiness.webhookHttpsValid,
+    warnings,
+  };
+}
 
 export const settingsRouter = Router();
 settingsRouter.use(requireAuth, requireMerchantContext);
@@ -57,8 +97,12 @@ settingsRouter.get('/', async (req, res, next) => {
     if (!pool) throw Error('Database tidak tersedia');
     const row = (await pool.query(select, [req.auth!.outletId, req.auth!.merchantId])).rows[0];
     if (!row) return res.status(404).json({ error: 'Outlet tidak ditemukan' });
+    const enableDynamicQris = row.enableDynamicQris ?? true;
+    const qrisImageUrl = row.qrisImageUrl ?? '';
+
     res.json({
       name: row.name,
+      merchantSlug: row.merchantSlug,
       slug: row.slug,
       description: row.description ?? '',
       address: row.address ?? '',
@@ -70,8 +114,15 @@ settingsRouter.get('/', async (req, res, next) => {
       enableTakeaway: row.enableTakeaway ?? true,
       enableTableService: row.enableTableService ?? true,
       enablePickupCounter: row.enablePickupCounter ?? true,
-      qrisImageUrl: row.qrisImageUrl ?? '',
+      enableDynamicQris,
+      qrisImageUrl,
       qrBaseUrl: row.qrBaseUrl ?? '',
+      paymentGateway: buildPaymentGatewayStatus(
+        req.auth!.merchantId,
+        row.merchantSlug ?? '',
+        enableDynamicQris,
+        qrisImageUrl,
+      ),
     });
   } catch (e) {
     next(e);
@@ -85,10 +136,12 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
-      await c.query('UPDATE merchants SET name=$1,updated_at=now() WHERE id=$2', [
-        v.name,
-        req.auth!.merchantId,
-      ]);
+      const mRow = (
+        await c.query('UPDATE merchants SET name=$1,updated_at=now() WHERE id=$2 RETURNING slug', [
+          v.name,
+          req.auth!.merchantId,
+        ])
+      ).rows[0];
       let finalSlug: string | undefined = v.slug;
       if (v.slug && v.slug.length >= 2) {
         const updatedOutlet = await c.query(
@@ -101,7 +154,7 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
         finalSlug = updatedOutlet.rows[0]?.slug ?? v.slug;
       }
       await c.query(
-        'INSERT INTO outlet_settings(outlet_id,merchant_id,description,address,whatsapp,logo_url,operating_hours,is_open,enable_dine_in,enable_takeaway,enable_table_service,enable_pickup_counter,qris_image_url,qr_base_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(outlet_id) DO UPDATE SET description=EXCLUDED.description,address=EXCLUDED.address,whatsapp=EXCLUDED.whatsapp,logo_url=EXCLUDED.logo_url,operating_hours=EXCLUDED.operating_hours,is_open=EXCLUDED.is_open,enable_dine_in=EXCLUDED.enable_dine_in,enable_takeaway=EXCLUDED.enable_takeaway,enable_table_service=EXCLUDED.enable_table_service,enable_pickup_counter=EXCLUDED.enable_pickup_counter,qris_image_url=EXCLUDED.qris_image_url,qr_base_url=EXCLUDED.qr_base_url,updated_at=now()',
+        'INSERT INTO outlet_settings(outlet_id,merchant_id,description,address,whatsapp,logo_url,operating_hours,is_open,enable_dine_in,enable_takeaway,enable_table_service,enable_pickup_counter,enable_dynamic_qris,qris_image_url,qr_base_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(outlet_id) DO UPDATE SET description=EXCLUDED.description,address=EXCLUDED.address,whatsapp=EXCLUDED.whatsapp,logo_url=EXCLUDED.logo_url,operating_hours=EXCLUDED.operating_hours,is_open=EXCLUDED.is_open,enable_dine_in=EXCLUDED.enable_dine_in,enable_takeaway=EXCLUDED.enable_takeaway,enable_table_service=EXCLUDED.enable_table_service,enable_pickup_counter=EXCLUDED.enable_pickup_counter,enable_dynamic_qris=EXCLUDED.enable_dynamic_qris,qris_image_url=EXCLUDED.qris_image_url,qr_base_url=EXCLUDED.qr_base_url,updated_at=now()',
         [
           req.auth!.outletId,
           req.auth!.merchantId,
@@ -115,6 +168,7 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
           v.enableTakeaway,
           v.enableTableService,
           v.enablePickupCounter,
+          v.enableDynamicQris,
           v.qrisImageUrl.trim(),
           v.qrBaseUrl.trim(),
         ],
@@ -127,10 +181,17 @@ settingsRouter.put('/', allowRoles('MERCHANT_OWNER'), async (req, res, next) => 
       });
       res.json({
         ...v,
+        merchantSlug: mRow?.slug ?? '',
         ...(finalSlug ? { slug: finalSlug } : {}),
         logoUrl: v.logoUrl.trim(),
         qrisImageUrl: v.qrisImageUrl.trim(),
         qrBaseUrl: v.qrBaseUrl.trim(),
+        paymentGateway: buildPaymentGatewayStatus(
+          req.auth!.merchantId,
+          mRow?.slug ?? '',
+          v.enableDynamicQris,
+          v.qrisImageUrl.trim(),
+        ),
       });
     } catch (e) {
       await c.query('ROLLBACK');
