@@ -1,33 +1,23 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Save, RotateCcw, Upload, AlertTriangle } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import React, { useEffect, useState } from 'react';
+import { Save, Upload, AlertTriangle, CheckCircle2, ShieldAlert } from 'lucide-react';
 import type { CafeSettings } from '../../types/pos';
 import { getQrUrlWarning, normalizeBaseUrl } from '../../utils/format';
 import { BrandMark } from '../../components/BrandMark';
-import { ConfirmModal } from '../../components/ConfirmModal';
 
 export const AdminSettingsPage: React.FC = () => {
-  const { state, updateCafeSettings, resetDemoData, pushToast } = usePos();
-  const [form, setForm] = useState<CafeSettings>(state.cafeSettings);
-  const [resetModalOpen, setResetModalOpen] = useState(false);
-  const lastSettingsJsonRef = useRef<string>(JSON.stringify(state.cafeSettings));
-
-  useEffect(() => {
-    const nextJson = JSON.stringify(state.cafeSettings);
-    if (nextJson !== lastSettingsJsonRef.current) {
-      lastSettingsJsonRef.current = nextJson;
-      setForm(state.cafeSettings);
-    }
-  }, [state.cafeSettings]);
+  const [form, setForm] = useState<CafeSettings | null>(null);
+  const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [saving, setSaving] = useState(false);
+  useEffect(() => { let active = true; fetch('/api/v1/settings').then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data?.error || 'Pengaturan tidak dapat dimuat.'); if (active) setForm({ ...data, qrBaseUrl: data.qrBaseUrl ?? '' }); }).catch((reason) => active && setError(reason instanceof Error ? reason.message : 'Pengaturan tidak dapat dimuat.')); return () => { active = false; }; }, []);
+  if (!form) return <div className="grid min-h-56 place-items-center rounded-2xl border border-[#E8E6DF] bg-white text-sm text-[#64625C]">{error || 'Memuat pengaturan cafe…'}</div>;
 
   const handleToggleOrderType = (key: 'enableDineIn' | 'enableTakeaway') => {
     const nextVal = !form[key];
     const otherKey = key === 'enableDineIn' ? 'enableTakeaway' : 'enableDineIn';
     if (!nextVal && !form[otherKey]) {
-      pushToast('Minimal satu jenis pesanan (Dine In atau Takeaway) harus aktif', 'warning');
+      setError('Minimal satu jenis pesanan (Dine In atau Takeaway) harus aktif');
       return;
     }
-    setForm((prev) => ({ ...prev, [key]: nextVal }));
+    setForm({ ...form, [key]: nextVal });
   };
 
   const handleToggleFulfillment = (key: 'enableTableService' | 'enablePickupCounter') => {
@@ -35,29 +25,45 @@ export const AdminSettingsPage: React.FC = () => {
     const otherKey =
       key === 'enableTableService' ? 'enablePickupCounter' : 'enableTableService';
     if (!nextVal && !form[otherKey]) {
-      pushToast('Minimal satu metode penyerahan harus aktif', 'warning');
+      setError('Minimal satu metode penyerahan harus aktif');
       return;
     }
-    setForm((prev) => ({ ...prev, [key]: nextVal }));
+    setForm({ ...form, [key]: nextVal });
   };
 
   const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 1_200_000) {
-      pushToast('Ukuran logo maksimal 1.2 MB', 'warning');
+      setError('Ukuran logo maksimal 1.2 MB');
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        setForm((prev) => ({ ...prev, logoUrl: reader.result as string }));
+        setForm({ ...form, logoUrl: reader.result as string });
       }
     };
     reader.readAsDataURL(file);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleQrisFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 1_200_000) {
+      setError('Ukuran gambar QRIS maksimal 1.2 MB');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setForm({ ...form, qrisImageUrl: reader.result });
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanSlug =
       form.slug
@@ -66,20 +72,22 @@ export const AdminSettingsPage: React.FC = () => {
         .replace(/[^a-z0-9-]+/g, '-')
         .replace(/^-|-$/g, '') || 'laris-coffee';
 
-    updateCafeSettings({
+    setSaving(true); setError(''); setNotice('');
+    try { const response = await fetch('/api/v1/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       ...form,
       name: form.name.trim() || 'LARIS Coffee',
       slug: cleanSlug,
-      qrBaseUrl: normalizeBaseUrl(form.qrBaseUrl),
-    });
-    pushToast('Pengaturan cafe disimpan dan langsung berlaku di web customer', 'success');
+      qrBaseUrl: form.qrBaseUrl?.trim() ? normalizeBaseUrl(form.qrBaseUrl) : '',
+    }) }); const data = await response.json(); if (!response.ok) throw new Error(data?.error || 'Pengaturan tidak dapat disimpan.'); setForm((current) => current ? { ...current, ...data } : current); setNotice('Pengaturan cafe berhasil disimpan.'); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Pengaturan tidak dapat disimpan.'); } finally { setSaving(false); }
   };
 
-  const qrWarning = getQrUrlWarning(form.qrBaseUrl);
+  const qrWarning = form.qrBaseUrl ? getQrUrlWarning(form.qrBaseUrl) : null;
 
   return (
     <div className="space-y-6 max-w-4xl">
       <form onSubmit={handleSubmit} className="space-y-6">
+        {notice && <p role="status" className="rounded-xl border border-[#B8E1C8] bg-[#E9F5EE] px-4 py-3 text-sm font-semibold text-[#15623A]">{notice}</p>}
+        {error && <p role="alert" className="rounded-xl bg-[#FDECEC] px-4 py-3 text-sm font-semibold text-[#A62626]">{error}</p>}
         {/* Service Configuration Toggles */}
         <section className="rounded-2xl border border-[#E8E6DF] bg-white p-6">
           <h2 className="text-base font-bold text-[#252525]">
@@ -179,7 +187,7 @@ export const AdminSettingsPage: React.FC = () => {
               {form.logoUrl && (
                 <button
                   type="button"
-                  onClick={() => setForm((prev) => ({ ...prev, logoUrl: '' }))}
+                  onClick={() => setForm({ ...form, logoUrl: '' })}
                   className="rounded-xl border border-[#E8E6DF] bg-white px-3 py-2 text-xs font-semibold text-[#64625C] hover:text-[#B91C1C]"
                 >
                   Pakai Emblem Default
@@ -213,6 +221,121 @@ export const AdminSettingsPage: React.FC = () => {
               />
             </div>
 
+            <div className="sm:col-span-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <label htmlFor="qris-image-url" className="block text-xs font-semibold text-[#252525]">Gambar QRIS Statis Merchant</label>
+                  <p className="mt-0.5 text-xs text-[#64625C]">Tampilkan hanya kode QRIS merchant yang benar-benar telah dikonfigurasi. Jika kosong, metode QRIS dinonaktifkan di Customer & POS.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="inline-flex items-center gap-1.5 rounded-xl border border-[#E8E6DF] bg-white px-3 py-1.5 text-xs font-semibold text-[#252525] hover:bg-[#FAF9F6] cursor-pointer">
+                    <Upload className="h-3.5 w-3.5" />
+                    <span>Unggah QRIS</span>
+                    <input type="file" accept="image/*" onChange={handleQrisFileUpload} className="hidden" />
+                  </label>
+                  {form.qrisImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, qrisImageUrl: '' })}
+                      className="rounded-xl border border-[#E8E6DF] bg-white px-3 py-1.5 text-xs font-semibold text-[#64625C] hover:text-[#B91C1C]"
+                    >
+                      Hapus QRIS
+                    </button>
+                  )}
+                </div>
+              </div>
+              <input id="qris-image-url" type="text" value={form.qrisImageUrl ?? ''} onChange={(e) => setForm({ ...form, qrisImageUrl: e.target.value })} placeholder="https://…/qris.png atau unggah gambar QRIS" className="w-full rounded-xl border border-[#E8E6DF] bg-white px-3.5 py-2.5 text-sm focus:border-[#1B4D3E] focus:outline-none" />
+              {form.qrisImageUrl ? (
+                <div className="flex items-center gap-3 rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <img src={form.qrisImageUrl} alt="Pratinjau QRIS statis" className="h-20 w-20 rounded-lg border border-[#E8E6DF] object-contain bg-white" />
+                  <div className="text-xs text-[#15623A] font-semibold">QRIS statis aktif — tersedia di Customer QR Ordering dan Manual POS.</div>
+                </div>
+              ) : (
+                <div className="text-xs text-[#9A520A]">QRIS belum dikonfigurasi — opsi QRIS otomatis disembunyikan untuk mencegah pembayaran gagal.</div>
+              )}
+            </div>
+
+            {/* Dynamic QRIS Payment Gateway Diagnostics & Toggle */}
+            <div className="sm:col-span-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] p-4 space-y-3.5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-xs font-bold text-[#252525]">
+                      Status Metode Pembayaran & Gateway (Midtrans Core API v2)
+                    </h3>
+                    <span className="rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-[#9A520A]">
+                      {form.paymentGateway?.environment ?? 'SANDBOX'}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-[#64625C]">
+                    Kredensial server dikelola secara aman di backend (tanpa mengekspos kunci rahasia ke browser).
+                  </p>
+                </div>
+
+                <label className="inline-flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-white px-3 py-2 text-xs font-semibold text-[#252525] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.enableDynamicQris ?? true}
+                    onChange={(e) => setForm({ ...form, enableDynamicQris: e.target.checked })}
+                    disabled={!form.paymentGateway?.dynamicQrisEligible}
+                    className="h-4 w-4 accent-[#1B4D3E] disabled:opacity-50"
+                  />
+                  <span>Aktifkan QRIS Otomatis</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">Tunai di Kasir</div>
+                  <div className="mt-1 flex items-center gap-1.5 font-bold text-[#15623A]">
+                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <span>Aktif</span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">QRIS Statis Manual</div>
+                  <div
+                    className={`mt-1 flex items-center gap-1.5 font-bold ${
+                      form.qrisImageUrl?.trim() ? 'text-[#15623A]' : 'text-[#64625C]'
+                    }`}
+                  >
+                    <span>{form.qrisImageUrl?.trim() ? 'Aktif (Verifikasi Kasir)' : 'Belum Dikonfigurasi'}</span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[#E8E6DF] bg-white p-3">
+                  <div className="text-[#64625C]">QRIS Otomatis (Midtrans)</div>
+                  <div
+                    className={`mt-1 flex items-center gap-1.5 font-bold ${
+                      form.paymentGateway?.dynamicQrisAvailable ? 'text-[#15623A]' : 'text-[#9A520A]'
+                    }`}
+                  >
+                    <span>
+                      {form.paymentGateway?.dynamicQrisAvailable
+                        ? 'Siap Digunakan (Sandbox)'
+                        : form.paymentGateway?.dynamicQrisEligible
+                          ? 'Dinonaktifkan Outlet'
+                          : 'Menunggu Konfigurasi'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {form.paymentGateway?.warnings && form.paymentGateway.warnings.length > 0 && (
+                <div className="rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-3.5 py-2.5 text-xs text-[#7C4106] space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold">
+                    <ShieldAlert className="h-3.5 w-3.5 shrink-0 text-[#9A520A]" />
+                    <span>Catatan Kesiapan Gateway:</span>
+                  </div>
+                  <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                    {form.paymentGateway.warnings.map((w, idx) => (
+                      <li key={idx}>{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
             <div className="sm:col-span-2">
               <label className="block text-xs font-semibold text-[#252525]">
                 Deskripsi Singkat
@@ -298,46 +421,15 @@ export const AdminSettingsPage: React.FC = () => {
           <div className="flex justify-end border-t border-[#E8E6DF] pt-4">
             <button
               type="submit"
-              className="inline-flex items-center gap-2 rounded-xl bg-[#1B4D3E] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#143B2F] transition-colors"
+              disabled={saving} className="inline-flex items-center gap-2 rounded-xl bg-[#1B4D3E] px-5 py-2.5 text-sm font-bold text-white hover:bg-[#143B2F] transition-colors disabled:opacity-60"
             >
               <Save className="h-4 w-4" />
-              <span>Simpan Pengaturan</span>
+              <span>{saving ? 'Menyimpan…' : 'Simpan Pengaturan'}</span>
             </button>
           </div>
         </section>
       </form>
 
-      {/* Reset Demo Data */}
-      <section className="rounded-2xl border border-[#E8E6DF] bg-white p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h3 className="text-sm font-bold text-[#252525]">Reset Demo Data</h3>
-          <p className="mt-1 text-xs text-[#64625C] max-w-xl">
-            Kembalikan seluruh data cafe, 8 produk awal, 5 kategori, 6 meja QR, dan contoh pesanan ke kondisi awal demo LARIS Coffee.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => setResetModalOpen(true)}
-          className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-2.5 text-xs font-bold text-[#A62626] hover:bg-[#FADADA] transition-colors whitespace-nowrap shrink-0"
-        >
-          <RotateCcw className="h-4 w-4" />
-          <span>Reset Demo Data</span>
-        </button>
-      </section>
-
-      <ConfirmModal
-        open={resetModalOpen}
-        title="Reset Seluruh Data Demo?"
-        description="Semua pesanan baru, meja tambahan, dan perubahan menu pada browser ini akan dikembalikan ke data seed awal LARIS Coffee."
-        confirmLabel="Ya, Reset Sekarang"
-        destructive
-        onCancel={() => setResetModalOpen(false)}
-        onConfirm={() => {
-          resetDemoData();
-          setResetModalOpen(false);
-          pushToast('Data demo dikembalikan ke kondisi awal', 'success');
-        }}
-      />
     </div>
   );
 };

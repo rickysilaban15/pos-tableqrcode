@@ -1,19 +1,58 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Download, Printer } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import { useToast } from '../../context/ToastContext';
+import type { CafeSettings, CafeTable } from '../../types/pos';
 import { BrandMark } from '../../components/BrandMark';
 import { QrCodeCanvas } from '../../components/QrCodeCanvas';
 import { buildTableQrUrl } from '../../utils/format';
 import { downloadTableCardPng } from '../../utils/qrExport';
 
+const defaultSettings: CafeSettings = {
+  name: 'Outlet',
+  slug: 'outlet',
+  logoUrl: '',
+  description: '',
+  address: '',
+  whatsapp: '',
+  operatingHours: '',
+  isOpen: true,
+  qrBaseUrl: typeof window !== 'undefined' ? window.location.origin : '',
+  enableDineIn: true,
+  enableTakeaway: true,
+  enableTableService: true,
+  enablePickupCounter: true,
+};
+
 export const AdminTablePrintPage: React.FC = () => {
   const { tableId } = useParams<{ tableId?: string }>();
-  const { state, pushToast } = usePos();
+  const { pushToast } = useToast();
+  const [cafeSettings, setCafeSettings] = useState<CafeSettings>(defaultSettings);
+  const [tables, setTables] = useState<CafeTable[]>([]);
+  const [loadError, setLoadError] = useState('');
+  const state = { cafeSettings, tables };
+  useEffect(() => {
+    let active = true;
+    Promise.all([fetch('/api/v1/tables'), fetch('/api/v1/settings')])
+      .then(async ([tRes, sRes]) => {
+        if (tRes.status === 401 || tRes.status === 403) {
+          window.location.replace('/merchant/login');
+          return;
+        }
+        const [data, sData] = await Promise.all([tRes.json(), sRes.json()]);
+        if (!tRes.ok) throw Error(data?.error || 'Meja tidak dapat dimuat.');
+        if (active) {
+          setTables(data.map((table: { id: string; name: string; area: string; isActive: boolean; qrToken?: string }) => ({ ...table, token: table.qrToken ?? '', createdAt: '', updatedAt: '' })));
+          if (sRes.ok) setCafeSettings({ ...defaultSettings, ...sData, qrBaseUrl: sData.qrBaseUrl || window.location.origin });
+        }
+      })
+      .catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : 'Meja tidak dapat dimuat.'); });
+    return () => { active = false; };
+  }, []);
 
-  const tablesToPrint = tableId
+  const tablesToPrint = (tableId
     ? state.tables.filter((t) => t.id === tableId)
-    : state.tables.filter((t) => t.isActive);
+    : state.tables.filter((t) => t.isActive)).filter((table) => Boolean(table.token));
 
   const singleTable = tableId ? tablesToPrint[0] : undefined;
 
@@ -68,6 +107,8 @@ export const AdminTablePrintPage: React.FC = () => {
 
       {/* Printable Table Tent Grid */}
       <main className="mx-auto max-w-5xl p-6 sm:p-10">
+        {loadError && <div role="alert" className="mb-6 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{loadError}</div>}
+        {tableId && !singleTable && !loadError && <div className="mb-6 rounded-xl border border-[#F6D3AE] bg-[#FEF3E6] px-4 py-3 text-sm text-[#7C4106]">QR cetak lama tetap dapat dipindai bila belum dicabut, tetapi token mentahnya tidak tersedia untuk dicetak ulang. Generate ulang QR dari halaman Meja & QR Code untuk membuat kartu baru.</div>}
         {tablesToPrint.length === 0 ? (
           <div className="rounded-2xl border border-[#E8E6DF] bg-white p-12 text-center">
             <p className="text-base font-bold text-[#252525]">Tidak ada meja untuk dicetak</p>

@@ -1,8 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Plus, Search, Pencil, Trash2, X } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
 import { PRODUCT_IMAGES } from '../../data/seedData';
-import type { Product, ToppingOption, VariantGroup } from '../../types/pos';
+import type { Category, Product, ToppingOption, VariantGroup } from '../../types/pos';
 import { formatRupiah } from '../../utils/format';
 import { ProductImage } from '../../components/ProductImage';
 import { ConfirmModal } from '../../components/ConfirmModal';
@@ -31,12 +30,80 @@ interface ProductFormState {
 }
 
 export const AdminMenuPage: React.FC = () => {
-  const { state, addProduct, updateProduct, deleteProduct, pushToast } = usePos();
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
   const [editorOpen, setEditorOpen] = useState(false);
   const [form, setForm] = useState<ProductFormState | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const state = { categories, products };
+  const load = async () => {
+    const [categoryResponse, productResponse] = await Promise.all([
+      fetch('/api/v1/categories'),
+      fetch('/api/v1/products?includeCustomizations=1'),
+    ]);
+    const [categoryData, productData] = await Promise.all([categoryResponse.json(), productResponse.json()]);
+    if (!categoryResponse.ok || !productResponse.ok) {
+      setError(categoryData?.error || productData?.error || 'Menu tidak dapat dimuat.');
+      return;
+    }
+    const richProducts = productData.map(
+      (product: {
+        id: string;
+        categoryId: string;
+        name: string;
+        description: string;
+        price: number;
+        imageUrl: string;
+        isActive: boolean;
+        customizations?: {
+          variants: { id: string; groupName: string; optionName: string; priceDelta: number; required: boolean }[];
+          addons: { id: string; name: string; price: number }[];
+        };
+      }) => {
+        const customizations = product.customizations ?? { variants: [], addons: [] };
+        const groups = new Map<string, VariantGroup>();
+        customizations.variants.forEach((item) => {
+          const group = groups.get(item.groupName) ?? {
+            id: item.groupName,
+            name: item.groupName,
+            required: item.required,
+            options: [],
+          };
+          group.required = group.required || item.required;
+          group.options.push({ id: item.id, label: item.optionName, priceDelta: item.priceDelta });
+          groups.set(item.groupName, group);
+        });
+        return {
+          ...product,
+          image: product.imageUrl || '',
+          variantGroups: [...groups.values()],
+          toppings: customizations.addons.map((item) => ({ id: item.id, name: item.name, price: item.price })),
+        } as Product;
+      },
+    );
+    setCategories(categoryData);
+    setProducts(richProducts);
+    setError('');
+  };
+  useEffect(() => {
+    void load();
+  }, []);
+  useEffect(() => {
+    if (!editorOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) {
+        setEditorOpen(false);
+        setForm(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editorOpen, saving]);
 
   const categoryMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -95,12 +162,12 @@ export const AdminMenuPage: React.FC = () => {
     setEditorOpen(true);
   };
 
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form) return;
     const trimmedName = form.name.trim();
     if (!trimmedName) {
-      pushToast('Nama produk wajib diisi', 'warning');
+      setError('Nama produk wajib diisi.');
       return;
     }
 
@@ -126,26 +193,23 @@ export const AdminMenuPage: React.FC = () => {
         price: Math.max(0, Number(t.price) || 0),
       }));
 
-    const payload: Omit<Product, 'id'> = {
+    const payload = {
       name: trimmedName,
       categoryId: form.categoryId,
       price: Math.max(0, Number(form.price) || 0),
       description: form.description.trim(),
-      image: form.image.trim(),
+      imageUrl: form.image.trim(),
       isActive: form.isActive,
-      variantGroups: cleanedVariants,
-      toppings: cleanedToppings,
+      customizations: {
+        variants: cleanedVariants.flatMap((group) => group.options.map((option) => ({ groupName: group.name, optionName: option.label, priceDelta: option.priceDelta, required: group.required }))),
+        addons: cleanedToppings.map((topping) => ({ name: topping.name, price: topping.price, isActive: true })),
+      },
     };
-
-    if (form.id) {
-      updateProduct(form.id, payload);
-      pushToast(`Produk "${trimmedName}" diperbarui`, 'success');
-    } else {
-      addProduct(payload);
-      pushToast(`Produk "${trimmedName}" ditambahkan`, 'success');
-    }
-    setEditorOpen(false);
-    setForm(null);
+    setSaving(true);
+    const response = await fetch(form.id ? `/api/v1/products/${form.id}/with-customizations` : '/api/v1/products/with-customizations', { method: form.id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = response.status === 204 ? null : await response.json(); setSaving(false);
+    if (!response.ok) { setError(result?.error || result?.message || 'Produk tidak dapat disimpan.'); return; }
+    setNotice(`Produk “${trimmedName}” ${form.id ? 'diperbarui' : 'ditambahkan'}.`); setEditorOpen(false); setForm(null); await load();
   };
 
   const addVariantGroup = () => {
@@ -206,6 +270,8 @@ export const AdminMenuPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {notice && <div role="status" className="rounded-xl border border-[#B8E1C8] bg-[#E9F5EE] px-4 py-3 text-sm text-[#15623A]">{notice}</div>}
+      {error && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{error}</div>}
       {/* Toolbar */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex flex-wrap items-center gap-2">
@@ -252,7 +318,7 @@ export const AdminMenuPage: React.FC = () => {
           </div>
         ) : (
           <>
-            <div className="md:hidden divide-y divide-[#E8E6DF]">
+            <div className="lg:hidden divide-y divide-[#E8E6DF]">
               {filteredProducts.map((product) => (
                 <div key={product.id} className="p-4 flex gap-3.5">
                   <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl border border-[#E8E6DF] bg-[#FAF9F6]">
@@ -278,11 +344,7 @@ export const AdminMenuPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => {
-                          void updateProduct(product.id, { isActive: !product.isActive });
-                          pushToast(
-                            `${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
-                            'default',
-                          );
+                          void fetch(`/api/v1/products/${product.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ isActive: !product.isActive }) }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status produk tidak dapat disimpan.'); return; } setNotice(`${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`); await load(); });
                         }}
                         className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold ${
                           product.isActive
@@ -317,27 +379,27 @@ export const AdminMenuPage: React.FC = () => {
               ))}
             </div>
 
-            <div className="hidden md:block overflow-x-auto">
+            <div className="hidden lg:block overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-[#E8E6DF] bg-[#FAF9F6] text-xs font-semibold text-[#64625C]">
-                    <th className="px-6 py-3.5">Produk</th>
-                    <th className="px-4 py-3.5">Kategori</th>
-                    <th className="px-4 py-3.5 text-right">Harga Nett</th>
-                    <th className="px-4 py-3.5">Kustomisasi</th>
-                    <th className="px-4 py-3.5">Status</th>
-                    <th className="px-6 py-3.5 text-right">Aksi</th>
+                    <th className="px-4 lg:px-5 py-3.5">Produk</th>
+                    <th className="px-3 py-3.5">Kategori</th>
+                    <th className="px-3 py-3.5 text-right">Harga Nett</th>
+                    <th className="px-3 py-3.5">Kustomisasi</th>
+                    <th className="px-3 py-3.5">Status</th>
+                    <th className="px-4 lg:px-5 py-3.5 text-right">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E8E6DF] text-sm">
                   {filteredProducts.map((product) => (
                     <tr key={product.id} className="hover:bg-[#FAF9F6]/70 transition-colors">
-                      <td className="px-6 py-3.5">
-                        <div className="flex items-center gap-3.5">
-                          <div className="h-12 w-16 shrink-0 overflow-hidden rounded-lg border border-[#E8E6DF] bg-[#FAF9F6]">
+                      <td className="px-4 lg:px-5 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className="h-11 w-14 shrink-0 overflow-hidden rounded-lg border border-[#E8E6DF] bg-[#FAF9F6]">
                             <ProductImage src={product.image} alt={product.name} />
                           </div>
-                          <div className="min-w-0 max-w-xs">
+                          <div className="min-w-0 max-w-[200px] lg:max-w-xs">
                             <div className="font-semibold text-[#252525] truncate">
                               {product.name}
                             </div>
@@ -347,26 +409,22 @@ export const AdminMenuPage: React.FC = () => {
                           </div>
                         </div>
                       </td>
-                      <td className="px-4 py-3.5 text-xs font-medium text-[#64625C] whitespace-nowrap">
+                      <td className="px-3 py-3.5 text-xs font-medium text-[#64625C] whitespace-nowrap">
                         {categoryMap.get(product.categoryId) ?? 'Lainnya'}
                       </td>
-                      <td className="px-4 py-3.5 text-right font-mono text-sm font-semibold text-[#252525] tabular-nums whitespace-nowrap">
+                      <td className="px-3 py-3.5 text-right font-mono text-sm font-semibold text-[#252525] tabular-nums whitespace-nowrap">
                         {formatRupiah(product.price)}
                       </td>
-                      <td className="px-4 py-3.5 text-xs text-[#64625C] whitespace-nowrap">
-                        <span>{product.variantGroups.length} grup varian</span>
-                        <span className="mx-1.5" aria-hidden="true">·</span>
+                      <td className="px-3 py-3.5 text-xs text-[#64625C] whitespace-nowrap">
+                        <span>{product.variantGroups.length} varian</span>
+                        <span className="mx-1" aria-hidden="true">·</span>
                         <span>{product.toppings.length} topping</span>
                       </td>
-                      <td className="px-4 py-3.5">
+                      <td className="px-3 py-3.5">
                         <button
                           type="button"
                           onClick={() => {
-                            void updateProduct(product.id, { isActive: !product.isActive });
-                            pushToast(
-                              `${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}`,
-                              'default',
-                            );
+                            void fetch(`/api/v1/products/${product.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ isActive: !product.isActive }) }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status produk tidak dapat disimpan.'); return; } setNotice(`${product.name} ${!product.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`); await load(); });
                           }}
                           className={`inline-flex items-center rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors whitespace-nowrap ${
                             product.isActive
@@ -377,7 +435,7 @@ export const AdminMenuPage: React.FC = () => {
                           {product.isActive ? 'Aktif' : 'Nonaktif'}
                         </button>
                       </td>
-                      <td className="px-6 py-3.5 text-right whitespace-nowrap">
+                      <td className="px-4 lg:px-5 py-3.5 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <button
                             type="button"
@@ -498,7 +556,7 @@ export const AdminMenuPage: React.FC = () => {
 
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-semibold text-[#252525]">
-                    Foto Produk (Pilih Galeri Studio atau URL)
+                    Foto Produk (Pilih Galeri Studio, Unggah File, atau URL)
                   </label>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {PRESET_IMAGE_OPTIONS.map((preset) => (
@@ -516,13 +574,38 @@ export const AdminMenuPage: React.FC = () => {
                       </button>
                     ))}
                   </div>
-                  <input
-                    type="text"
-                    value={form.image}
-                    onChange={(e) => setForm({ ...form, image: e.target.value })}
-                    placeholder="/src/assets/images/... atau https://..."
-                    className="mt-2 w-full rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 font-mono text-xs focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
-                  />
+                  <div className="mt-2 flex flex-col sm:flex-row gap-2">
+                    <input
+                      type="text"
+                      value={form.image}
+                      onChange={(e) => setForm({ ...form, image: e.target.value })}
+                      placeholder="/src/assets/images/... atau https://..."
+                      className="flex-1 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3.5 py-2 font-mono text-xs focus:border-[#1B4D3E] focus:bg-white focus:outline-none"
+                    />
+                    <label className="inline-flex cursor-pointer items-center justify-center rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-2 text-xs font-semibold text-[#1B4D3E] hover:bg-white whitespace-nowrap">
+                      <span>Unggah Foto</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                        className="sr-only"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          if (file.size > 1_200_000) {
+                            setError('Ukuran foto maksimal 1.2 MB.');
+                            return;
+                          }
+                          const reader = new FileReader();
+                          reader.onload = () => {
+                            if (typeof reader.result === 'string') {
+                              setForm((prev) => (prev ? { ...prev, image: reader.result as string } : prev));
+                            }
+                          };
+                          reader.readAsDataURL(file);
+                        }}
+                      />
+                    </label>
+                  </div>
                 </div>
               </div>
 
@@ -756,9 +839,10 @@ export const AdminMenuPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
+                  disabled={saving}
                   className="rounded-xl bg-[#1B4D3E] px-5 py-2 text-sm font-semibold text-white hover:bg-[#143B2F]"
                 >
-                  Simpan Produk
+                  {saving ? 'Menyimpan…' : 'Simpan Produk'}
                 </button>
               </div>
             </div>
@@ -775,8 +859,7 @@ export const AdminMenuPage: React.FC = () => {
         onCancel={() => setDeleteTargetId(null)}
         onConfirm={() => {
           if (deleteTargetId) {
-            deleteProduct(deleteTargetId);
-            pushToast('Produk dihapus dari menu', 'default');
+            void fetch(`/api/v1/products/${deleteTargetId}`, { method: 'DELETE' }).then(async (response) => { if (!response.ok) { const data = await response.json(); setError(data?.error || 'Produk tidak dapat diarsipkan.'); return; } setNotice('Produk diarsipkan dari menu.'); await load(); });
           }
           setDeleteTargetId(null);
         }}

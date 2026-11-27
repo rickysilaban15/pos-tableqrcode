@@ -12,7 +12,7 @@
   --color-canvas: #FAF9F6;
   --color-surface: #FFFFFF;
   --color-charcoal: #252525;
-  --color-muted: #64625C;
+  --color-muted: #5C5952;
   --color-border-subtle: #E8E6DF;
 }
 
@@ -21,16 +21,45 @@
     font-family: var(--font-sans);
     background-color: var(--color-canvas);
     color: var(--color-charcoal);
+    caret-color: var(--color-brand);
+    scroll-behavior: smooth;
     -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background-color: rgba(252, 216, 4, 0.42);
+    color: #1B4D3E;
   }
 
   h1, h2, h3, h4 {
     text-wrap: balance;
   }
+
+  a {
+    text-underline-offset: 3px;
+  }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbars for desktop tables & drawers */
+@media (pointer: fine) {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #F3F1EC;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #CFCBC0;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #A9A498;
+  }
 }
 
 /* Hide scrollbars cleanly for horizontal category tabs on mobile */
@@ -40,6 +69,31 @@
 .no-scrollbar {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+/* 3D Perspective Stage for Landing Product Previews */
+.stage-perspective {
+  perspective: 1400px;
+}
+.stage-tilt-left {
+  transform: rotateY(-5deg) rotateX(2.5deg);
+  transform-style: preserve-3d;
+  transition: transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.stage-tilt-left:hover {
+  transform: rotateY(-1.5deg) rotateX(1deg);
+}
+
+@keyframes subtle-float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+.animate-float-slow {
+  animation: subtle-float 6s ease-in-out infinite;
 }
 
 @media print {
@@ -58,5 +112,49 @@
   .print-break-inside-avoid {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+  .receipt-print-only {
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 auto !important;
+  }
+  .receipt-thermal-58 {
+    width: 58mm !important;
+    max-width: 58mm !important;
+    font-size: 11px !important;
+  }
+  .receipt-thermal-80 {
+    width: 80mm !important;
+    max-width: 80mm !important;
+    font-size: 12px !important;
+  }
+}
+
+/* Respect user preference to reduce motion — disable animations and transitions */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .stage-tilt-left,
+  .stage-tilt-left:hover {
+    transform: none !important;
+  }
+}
+
+/* Focus ring for keyboard navigation */
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+}
+
+/* Better touch targets on touch devices without breaking compact inline pills */
+@media (hover: none) {
+  button, [role="button"] {
+    min-height: 40px;
   }
 }

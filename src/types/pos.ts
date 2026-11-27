@@ -2,7 +2,34 @@ export type OrderType = 'DINE_IN' | 'TAKEAWAY';
 
 export type FulfillmentMethod = 'TABLE_SERVICE' | 'PICKUP_COUNTER';
 
-export type PaymentMethod = 'QRIS' | 'E_WALLET' | 'BANK_TRANSFER' | 'CASHIER';
+export type PaymentMethod = 'QRIS' | 'QRIS_DYNAMIC' | 'E_WALLET' | 'BANK_TRANSFER' | 'CASHIER';
+
+export interface DynamicQrisPaymentInfo {
+  method: 'QRIS_DYNAMIC';
+  provider: 'MIDTRANS';
+  environment: 'SANDBOX' | 'PRODUCTION';
+  providerOrderId: string | null;
+  providerTransactionId?: string | null;
+  qrString: string | null;
+  qrImageUrl: string | null;
+  acquirer?: string | null;
+  expiresAt: string | null;
+}
+
+export interface PaymentGatewayStatus {
+  provider: 'MIDTRANS';
+  environment: 'SANDBOX' | 'PRODUCTION';
+  sandboxOnlyEnforced: boolean;
+  cashAvailable: boolean;
+  staticQrisConfigured: boolean;
+  dynamicQrisEligible: boolean;
+  dynamicQrisEnabledByOutlet: boolean;
+  dynamicQrisAvailable: boolean;
+  connectionReady: boolean;
+  merchantDesignated: boolean;
+  webhookConfigured: boolean;
+  warnings: string[];
+}
 
 export type PaymentStatus = 'BELUM_DIBAYAR' | 'LUNAS' | 'GAGAL';
 
@@ -24,6 +51,11 @@ export interface CafeSettings {
   enableTakeaway: boolean;
   enableTableService: boolean;
   enablePickupCounter: boolean;
+  enableDynamicQris?: boolean;
+  dynamicQrisAvailable?: boolean;
+  dynamicQrisEnvironment?: 'SANDBOX' | 'PRODUCTION';
+  qrisImageUrl?: string;
+  paymentGateway?: PaymentGatewayStatus;
 }
 
 export interface Category {
@@ -133,6 +165,7 @@ export interface Order {
   paymentStatus: PaymentStatus;
   orderStatus: OrderStatus;
   cashierStatus: CashierStatus;
+  dynamicPayment?: DynamicQrisPaymentInfo;
 }
 
 export interface ActivityLog {

@@ -1,435 +1,587 @@
-import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
-import {
-  Search,
-  ChefHat,
-  CheckCircle2,
-  Banknote,
-  ExternalLink,
-  Info,
-  RefreshCw,
-} from 'lucide-react';
-import { usePos } from '../../context/PosContext';
-import type { Order, OrderStatus } from '../../types/pos';
-import {
-  formatDateTime,
-  formatRupiah,
-  getFulfillmentLabel,
-  getOrderTypeLabel,
-  getPaymentMethodLabel,
-} from '../../utils/format';
-import {
-  CashierStatusBadge,
-  OrderStatusBadge,
-  PaymentStatusBadge,
-} from '../../components/StatusBadge';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Banknote, CheckCircle2, ChefHat, Info, RefreshCw, Search, XCircle } from 'lucide-react';
+import { formatDateTime, formatRupiah } from '../../utils/format';
+import { ReceiptModal, type ReceiptData } from '../../components/ReceiptModal';
+import { ConfirmModal } from '../../components/ConfirmModal';
 
-type FilterTab = 'ALL' | OrderStatus;
+type OrderStatus = 'AWAITING_PAYMENT' | 'NEW_ORDER' | 'IN_PROGRESS' | 'READY_TO_SERVE';
+type Method = 'CASH' | 'QRIS' | 'QRIS_DYNAMIC';
+type Item = {
+  productName: string;
+  unitPrice: number;
+  quantity: number;
+  selections?: {
+    variants?: { option_name?: string; optionName?: string }[];
+    addons?: { name: string }[];
+    note?: string;
+  };
+};
+type Order = {
+  id: string;
+  customerName: string;
+  totalAmount: number;
+  orderStatus: OrderStatus;
+  paymentStatus: string;
+  createdAt: string;
+  method: Method;
+  provider?: string;
+  environment?: 'SANDBOX' | 'PRODUCTION' | string;
+  providerOrderId?: string | null;
+  orderSource?: 'QR' | 'POS';
+  orderType?: 'DINE_IN' | 'TAKEAWAY';
+  fulfillmentMethod?: 'TABLE_SERVICE' | 'PICKUP_COUNTER';
+  tableName?: string;
+  items?: Item[];
+};
+
+const label: Record<OrderStatus, string> = {
+  AWAITING_PAYMENT: 'Menunggu Pembayaran',
+  NEW_ORDER: 'Pesanan Masuk',
+  IN_PROGRESS: 'Sedang Diproses',
+  READY_TO_SERVE: 'Pesanan Siap',
+};
+
+const statusClass: Record<OrderStatus, string> = {
+  AWAITING_PAYMENT: 'bg-[#FEF3E6] text-[#9A520A] border-[#F6D3AE]',
+  NEW_ORDER: 'bg-[#1B4D3E]/10 text-[#1B4D3E] border-[#1B4D3E]/20',
+  IN_PROGRESS: 'bg-[#FCD804]/30 text-[#252525] border-[#D9B800]/40',
+  READY_TO_SERVE: 'bg-[#E9F5EE] text-[#15623A] border-[#B8E1C8]',
+};
+
+const paymentLabel = (method: Method) =>
+  method === 'CASH' ? 'Tunai' : method === 'QRIS_DYNAMIC' ? 'QRIS Otomatis' : 'QRIS Statis';
+
+const Selections: React.FC<{ item: Item }> = ({ item }) => {
+  const s = item.selections;
+  const values = [
+    ...(s?.variants ?? []).map((x) => x.optionName ?? x.option_name ?? ''),
+    ...(s?.addons ?? []).map((x) => `+ ${x.name}`),
+  ].filter(Boolean);
+  return (
+    <>
+      {values.length > 0 && <p className="mt-0.5 text-xs text-[#64625C]">{values.join(' · ')}</p>}
+      {s?.note && <p className="mt-0.5 text-xs italic text-[#64625C]">Catatan: “{s.note}”</p>}
+    </>
+  );
+};
+
+const Items: React.FC<{ order: Order }> = ({ order }) => (
+  <ul className="divide-y divide-[#F0EEE8] rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-4">
+    {order.items!.map((item, i) => (
+      <li key={`${order.id}-${i}`} className="flex items-start justify-between gap-4 py-2.5">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-[#252525]">
+            <span className="mr-1.5 font-mono text-[#1B4D3E] tabular-nums">{item.quantity}x</span>
+            {item.productName}
+          </div>
+          <Selections item={item} />
+        </div>
+        <div className="shrink-0 font-mono text-xs font-semibold text-[#252525] tabular-nums">
+          {formatRupiah(item.unitPrice * item.quantity)}
+        </div>
+      </li>
+    ))}
+  </ul>
+);
 
 export const AdminOrdersPage: React.FC = () => {
-  const { state, updateOrderStatus, markOrderPaid, refreshFromServer, pushToast } = usePos();
-  const [filter, setFilter] = useState<FilterTab>('ALL');
+  const [pending, setPending] = useState<Order[]>([]);
+  const [active, setActive] = useState<Order[]>([]);
+  const [filter, setFilter] = useState<'ALL' | OrderStatus>('ALL');
   const [search, setSearch] = useState('');
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ReceiptData | null>(null);
+  const [cash, setCash] = useState<Record<string, string>>({});
+  const [refundTarget, setRefundTarget] = useState<Order | null>(null);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState<string | null>(null);
+  const hasConnectedOnce = useRef(false);
 
-  const counts = useMemo(() => {
-    return {
-      ALL: state.orders.length,
-      ORDER_BARU: state.orders.filter((o) => o.orderStatus === 'ORDER_BARU').length,
-      MEMASAK: state.orders.filter((o) => o.orderStatus === 'MEMASAK').length,
-      DISAJIKAN: state.orders.filter((o) => o.orderStatus === 'DISAJIKAN').length,
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [p, o] = await Promise.all([fetch('/api/v1/payments/pending'), fetch('/api/v1/orders')]);
+      const [pv, ov] = await Promise.all([p.json(), o.json()]);
+      if (!p.ok || !o.ok || !Array.isArray(pv) || !Array.isArray(ov)) {
+        setError(pv?.error || ov?.error || 'Data pesanan tidak dapat dimuat. Segarkan halaman atau masuk kembali.');
+        setLoading(false);
+        return;
+      }
+      setPending(pv.map((x: Order) => ({ ...x, orderStatus: 'AWAITING_PAYMENT' as const })));
+      setActive(ov);
+      setError('');
+    } catch {
+      setError('Gagal terhubung ke server pesanan.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource('/api/v1/events');
+    const refresh = () => {
+      void load();
     };
-  }, [state.orders]);
-
-  const filteredOrders = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return state.orders.filter((order) => {
-      if (filter !== 'ALL' && order.orderStatus !== filter) return false;
-      if (!q) return true;
-      return (
-        order.id.toLowerCase().includes(q) ||
-        order.customerName.toLowerCase().includes(q) ||
-        (order.tableName?.toLowerCase().includes(q) ?? false) ||
-        order.items.some((it) => it.productName.toLowerCase().includes(q))
-      );
+    es.addEventListener('connected', () => {
+      if (hasConnectedOnce.current) void load();
+      hasConnectedOnce.current = true;
     });
-  }, [state.orders, filter, search]);
+    ['order:created', 'payment:confirmed', 'order:updated', 'order:cancelled', 'order:refunded', 'order:expired'].forEach(
+      (ev) => {
+        es.addEventListener(ev, refresh);
+      },
+    );
+    return () => {
+      es.close();
+    };
+  }, [load]);
 
-  const selectedOrder: Order | undefined = state.orders.find(
-    (o) => o.id === selectedOrderId,
+  const all = useMemo(() => [...pending, ...active], [pending, active]);
+  const counts = useMemo<Record<'ALL' | OrderStatus, number>>(
+    () => ({
+      ALL: all.length,
+      AWAITING_PAYMENT: pending.length,
+      NEW_ORDER: active.filter((x) => x.orderStatus === 'NEW_ORDER').length,
+      IN_PROGRESS: active.filter((x) => x.orderStatus === 'IN_PROGRESS').length,
+      READY_TO_SERVE: 0,
+    }),
+    [active, all.length, pending.length],
   );
 
-  const handleStatusChange = async (orderId: string, nextStatus: OrderStatus) => {
-    await updateOrderStatus(orderId, nextStatus);
-    if (nextStatus === 'MEMASAK') {
-      pushToast(`Pesanan ${orderId} dikonfirmasi & mulai dimasak`, 'success');
-    } else if (nextStatus === 'DISAJIKAN') {
-      pushToast(`Pesanan ${orderId} disajikan — Transaksi Kasir Selesai`, 'success');
+  const shown = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return all.filter(
+      (x) =>
+        (filter === 'ALL' || x.orderStatus === filter) &&
+        (!q ||
+          [x.id, x.customerName, x.tableName, ...(x.items ?? []).map((i) => i.productName)]
+            .filter(Boolean)
+            .some((v) => v!.toLowerCase().includes(q))),
+    );
+  }, [all, filter, search]);
+
+  const detail = async (order: Order) => {
+    setWorking(order.id);
+    const response = await fetch(`/api/v1/orders/${order.id}/receipt`);
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Detail pesanan tidak dapat dimuat');
+      return;
     }
+    setSelected(payload);
   };
 
-  const handleConfirmCashierPayment = async (orderId: string) => {
-    await markOrderPaid(orderId);
-    pushToast(`Pembayaran kasir untuk ${orderId} ditandai Lunas`, 'success');
+  const pay = async (order: Order) => {
+    if (order.method === 'CASH' && Number(cash[order.id]) < order.totalAmount) {
+      setError('Nominal tunai harus sama dengan atau lebih dari total pesanan.');
+      return;
+    }
+    setWorking(order.id);
+    const response = await fetch(`/api/v1/payments/${order.id}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(order.method === 'CASH' ? { cashReceived: Number(cash[order.id]) } : {}),
+    });
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Pembayaran tidak dapat diverifikasi');
+      return;
+    }
+    setNotice(`Pembayaran ${order.id} telah diverifikasi. Pesanan masuk ke antrean.`);
+    await load();
   };
 
-  const tabs: { key: FilterTab; label: string }[] = [
-    { key: 'ALL', label: 'Semua' },
-    { key: 'ORDER_BARU', label: 'Order Baru' },
-    { key: 'MEMASAK', label: 'Memasak' },
-    { key: 'DISAJIKAN', label: 'Disajikan' },
+  const reconcileDynamic = async (order: Order) => {
+    setWorking(order.id);
+    setError('');
+    const response = await fetch(`/api/v1/payments/${order.id}/reconcile`, { method: 'POST' });
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Pengecekan status Midtrans gagal');
+      return;
+    }
+    if (payload.paymentStatus === 'PAID') {
+      setNotice(`Pembayaran QRIS Otomatis ${order.id} terverifikasi oleh Midtrans. Pesanan masuk antrean.`);
+    } else if (payload.paymentStatus === 'EXPIRED') {
+      setNotice(`Tagihan QRIS Otomatis ${order.id} telah kedaluwarsa.`);
+    } else {
+      setNotice(`Status Midtrans untuk ${order.id} masih menunggu pembayaran (${payload.providerStatus ?? 'pending'}).`);
+    }
+    await load();
+  };
+
+  const advance = async (order: Order, status: 'IN_PROGRESS' | 'READY_TO_SERVE') => {
+    setWorking(order.id);
+    const response = await fetch(`/api/v1/orders/${order.id}/status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Status pesanan tidak dapat diperbarui');
+      return;
+    }
+    setNotice(
+      status === 'IN_PROGRESS' ? `Pesanan ${order.id} mulai diproses.` : `Pesanan ${order.id} siap disajikan.`,
+    );
+    await load();
+  };
+
+  const cancelOrder = async (order: Order) => {
+    setWorking(order.id);
+    const response = await fetch(`/api/v1/orders/${order.id}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'Dibatalkan oleh merchant' }),
+    });
+    const payload = await response.json();
+    setWorking(null);
+    if (!response.ok) {
+      setError(payload?.error || 'Pesanan tidak dapat dibatalkan');
+      return;
+    }
+    setNotice(
+      payload.paymentStatus === 'REFUNDED'
+        ? `Pesanan ${order.id} dibatalkan dan di-refund.`
+        : `Pesanan ${order.id} dibatalkan.`,
+    );
+    await load();
+  };
+
+  const tabs: { key: 'ALL' | OrderStatus; text: string }[] = [
+    { key: 'ALL', text: 'Semua' },
+    { key: 'AWAITING_PAYMENT', text: 'Verifikasi Bayar' },
+    { key: 'NEW_ORDER', text: 'Pesanan Masuk' },
+    { key: 'IN_PROGRESS', text: 'Diproses' },
   ];
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      {/* Live Cross-Device Sync Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-[#E8E6DF] bg-white px-4 sm:px-5 py-3.5 text-xs text-[#64625C]">
+      <div className="flex flex-col justify-between gap-3 rounded-2xl border border-[#E8E6DF] bg-white px-4 py-3.5 text-xs text-[#64625C] sm:flex-row sm:items-center sm:px-5">
         <div className="flex items-start gap-2.5">
-          <Info className="h-4 w-4 text-[#1B4D3E] shrink-0 mt-0.5" />
-          <p className="leading-relaxed">
-            <span className="font-semibold text-[#252525]">Sinkronisasi Real-Time Lintas Perangkat Aktif:</span>{' '}
-            Pesanan yang dibuat dari kamera HP customer langsung masuk otomatis ke daftar ini, dan setiap perubahan status langsung memperbarui halaman tracking di HP customer.
-          </p>
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#1B4D3E]" />
+          <div>
+            <h2 className="text-sm font-bold text-[#252525]">Operasional Pesanan</h2>
+            <p className="mt-0.5 leading-relaxed">
+              <span className="font-semibold text-[#252525]">Pembayaran diverifikasi lebih dulu:</span> pesanan hanya
+              masuk antrean setelah pembayaran diverifikasi. Segarkan untuk melihat pembaruan perangkat lain.
+            </p>
+          </div>
         </div>
         <button
           type="button"
-          onClick={async () => {
-            await refreshFromServer();
-            pushToast('Data pesanan disegarkan dari server', 'default');
-          }}
-          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-1.5 text-xs font-semibold text-[#252525] hover:bg-white transition-colors whitespace-nowrap shrink-0 self-start sm:self-center"
+          onClick={() => void load()}
+          disabled={loading}
+          className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 self-start whitespace-nowrap rounded-lg border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-1.5 text-xs font-semibold text-[#252525] transition-colors hover:bg-white disabled:opacity-60 sm:self-center"
         >
-          <RefreshCw className="h-3.5 w-3.5" />
-          <span>Segarkan</span>
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Segarkan
         </button>
       </div>
 
-      {/* Controls Row */}
+      {notice && (
+        <div role="status" className="rounded-xl border border-[#B8E1C8] bg-[#E9F5EE] px-4 py-3 text-sm text-[#15623A]">
+          {notice}
+        </div>
+      )}
+      {error && (
+        <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">
+          {error}
+        </div>
+      )}
+
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar rounded-xl border border-[#E8E6DF] bg-white p-1">
-          {tabs.map((t) => {
-            const active = filter === t.key;
-            return (
-              <button
-                key={t.key}
-                type="button"
-                onClick={() => setFilter(t.key)}
-                className={`inline-flex min-h-[36px] items-center gap-2 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
-                  active
-                    ? 'bg-[#1B4D3E] text-white'
-                    : 'text-[#64625C] hover:text-[#252525] hover:bg-[#FAF9F6]'
-                }`}
-              >
-                <span>{t.label}</span>
-                <span
-                  className={`font-mono text-[11px] tabular-nums ${
-                    active ? 'text-[#FCD804]' : 'text-[#64625C]'
-                  }`}
-                >
-                  {counts[t.key]}
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex items-center gap-1 overflow-x-auto rounded-xl border border-[#E8E6DF] bg-white p-1 no-scrollbar">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setFilter(tab.key)}
+              className={`inline-flex min-h-[36px] shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                filter === tab.key ? 'bg-[#1B4D3E] text-white' : 'text-[#64625C] hover:bg-[#FAF9F6] hover:text-[#252525]'
+              }`}
+            >
+              <span>{tab.text}</span>
+              <span className={`font-mono text-[11px] tabular-nums ${filter === tab.key ? 'text-[#FCD804]' : 'text-[#64625C]'}`}>
+                {counts[tab.key]}
+              </span>
+            </button>
+          ))}
         </div>
 
         <div className="relative w-full md:w-72">
           <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#64625C]" />
           <input
-            type="text"
+            type="search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Cari Order ID, nama, meja..."
+            placeholder="Cari ID, nama, meja, produk..."
             className="w-full rounded-xl border border-[#E8E6DF] bg-white py-2.5 pl-10 pr-4 text-sm text-[#252525] placeholder:text-[#8C8980] focus:border-[#1B4D3E] focus:outline-none"
           />
         </div>
       </div>
 
-      {/* Orders List */}
-      {filteredOrders.length === 0 ? (
+      {loading ? (
+        <div className="rounded-2xl border border-[#E8E6DF] bg-white p-12 text-center text-sm text-[#64625C]">
+          Memuat pesanan dari PostgreSQL…
+        </div>
+      ) : shown.length === 0 ? (
         <div className="rounded-2xl border border-[#E8E6DF] bg-white p-12 text-center">
           <p className="text-base font-bold text-[#252525]">Tidak ada pesanan ditemukan</p>
-          <p className="mt-1 text-sm text-[#64625C]">
-            Ubah filter pencarian atau buat pesanan baru melalui halaman Customer Web.
-          </p>
+          <p className="mt-1 text-sm text-[#64625C]">Ubah filter atau tunggu pesanan baru dari Customer Web.</p>
         </div>
       ) : (
         <div className="space-y-4">
-          {filteredOrders.map((order) => (
-            <article
-              key={order.id}
-              className="rounded-2xl border border-[#E8E6DF] bg-white p-5 sm:p-6 transition-colors hover:border-[#D3D0C7]"
-            >
-              {/* Header Strip */}
-              <div className="flex flex-col gap-3 border-b border-[#E8E6DF] pb-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-                  <span className="font-mono text-sm font-bold text-[#252525] tabular-nums">
-                    {order.id}
-                  </span>
-                  <span className="text-[#D3D0C7]" aria-hidden="true">·</span>
-                  <span className="text-sm font-bold text-[#252525]">{order.customerName}</span>
-                  {order.customerWhatsapp && (
-                    <>
-                      <span className="text-[#D3D0C7]" aria-hidden="true">·</span>
-                      <span className="font-mono text-xs text-[#64625C]">{order.customerWhatsapp}</span>
-                    </>
-                  )}
-                  <span className="text-[#D3D0C7]" aria-hidden="true">·</span>
-                  <span className="font-mono text-xs text-[#64625C] tabular-nums">
-                    {formatDateTime(order.createdAt)}
-                  </span>
-                </div>
+          {shown.map((order) => {
+            const cashVal = Number(cash[order.id] || 0);
+            const cashChange = cashVal >= order.totalAmount ? cashVal - order.totalAmount : null;
 
-                {/* 3 Separated Statuses: Payment, Order, Cashier */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <PaymentStatusBadge status={order.paymentStatus} />
-                  <OrderStatusBadge status={order.orderStatus} />
-                  <CashierStatusBadge status={order.cashierStatus} />
-                </div>
-              </div>
-
-              {/* Body */}
-              <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-12">
-                {/* Order Context & Items */}
-                <div className="lg:col-span-8 space-y-3">
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#64625C]">
-                    <span>
-                      Jenis:{' '}
-                      <strong className="font-semibold text-[#252525]">
-                        {getOrderTypeLabel(order.orderType)}
-                      </strong>
-                    </span>
-                    {order.orderType === 'DINE_IN' && order.tableName && (
-                      <span>
-                        Meja:{' '}
-                        <strong className="font-mono font-bold text-[#1B4D3E]">
-                          {order.tableName}
-                        </strong>
+            return (
+              <article
+                key={order.id}
+                className="rounded-2xl border border-[#E8E6DF] bg-white p-5 transition-colors hover:border-[#D3D0C7] sm:p-6"
+              >
+                <div className="flex flex-col gap-3 border-b border-[#E8E6DF] pb-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    {/* Keep order.id as the first .font-mono element inside <article> for API/E2E lookup */}
+                    <span className="font-mono text-xs sm:text-sm font-bold text-[#252525] tabular-nums">{order.id}</span>
+                    <span className="text-[#D3D0C7]">·</span>
+                    <span className="text-sm font-bold text-[#252525]">{order.customerName}</span>
+                    {order.orderSource && (
+                      <span
+                        className={`rounded-md border px-2 py-0.5 text-[11px] font-bold ${
+                          order.orderSource === 'POS'
+                            ? 'border-[#F6D3AE] bg-[#FEF3E6] text-[#9A520A]'
+                            : 'border-[#1B4D3E]/20 bg-[#EEF4F1] text-[#1B4D3E]'
+                        }`}
+                      >
+                        {order.orderSource === 'POS' ? 'Kasir POS' : 'QR Meja'}
                       </span>
                     )}
-                    <span>
-                      Penyerahan:{' '}
-                      <strong className="font-semibold text-[#252525]">
-                        {getFulfillmentLabel(order.fulfillmentMethod)}
-                      </strong>
-                    </span>
-                    <span>
-                      Pembayaran:{' '}
-                      <strong className="font-semibold text-[#252525]">
-                        {getPaymentMethodLabel(order.paymentMethod, order.paymentSubMethod)}
-                      </strong>
-                    </span>
+                    <span className="text-[#D3D0C7]">·</span>
+                    <span className="font-mono text-xs text-[#64625C] tabular-nums">{formatDateTime(order.createdAt)}</span>
                   </div>
 
-                  <ul className="divide-y divide-[#F0EEE8] rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-4">
-                    {order.items.map((item, idx) => (
-                      <li key={`${order.id}-item-${idx}`} className="py-2.5 flex items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-[#252525]">
-                            <span className="font-mono text-[#1B4D3E] mr-1.5 tabular-nums">
-                              {item.quantity}x
-                            </span>
-                            {item.productName}
-                          </div>
-                          {(item.selectedVariants.length > 0 || item.selectedToppings.length > 0) && (
-                            <p className="mt-0.5 text-xs text-[#64625C]">
-                              {[
-                                ...item.selectedVariants.map((v) => v.optionLabel),
-                                ...item.selectedToppings.map((t) => `+ ${t.name}`),
-                              ].join(' · ')}
-                            </p>
-                          )}
-                          {item.notes && (
-                            <p className="mt-0.5 text-xs italic text-[#64625C]">
-                              Catatan: "{item.notes}"
-                            </p>
-                          )}
-                        </div>
-                        <div className="font-mono text-xs font-semibold text-[#252525] tabular-nums shrink-0">
-                          {formatRupiah(item.subtotal)}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-
-                  {order.orderNote && (
-                    <p className="text-xs text-[#64625C]">
-                      Catatan Pesanan:{' '}
-                      <span className="font-medium text-[#252525]">{order.orderNote}</span>
-                    </p>
-                  )}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {order.environment === 'SANDBOX' && (
+                      <span className="inline-flex shrink-0 whitespace-nowrap rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-[#9A520A]">
+                        SANDBOX
+                      </span>
+                    )}
+                    <span
+                      className={`inline-flex shrink-0 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium ${
+                        order.orderStatus === 'AWAITING_PAYMENT'
+                          ? 'bg-[#FEF3E6] text-[#9A520A] border-[#F6D3AE]'
+                          : 'bg-[#E9F5EE] text-[#15623A] border-[#B8E1C8]'
+                      }`}
+                    >
+                      {order.orderStatus === 'AWAITING_PAYMENT' ? 'Belum Dibayar' : 'Lunas'}
+                    </span>
+                    <span
+                      className={`inline-flex shrink-0 whitespace-nowrap rounded-md border px-2.5 py-1 text-xs font-semibold ${statusClass[order.orderStatus]}`}
+                    >
+                      {label[order.orderStatus]}
+                    </span>
+                  </div>
                 </div>
 
-                {/* Right Summary & Actions */}
-                <div className="lg:col-span-4 flex flex-col justify-between gap-4 lg:border-l lg:border-[#E8E6DF] lg:pl-5">
-                  <div>
-                    <p className="text-xs text-[#64625C]">Total Pesanan (Nett)</p>
-                    <p className="mt-0.5 font-mono text-xl font-bold text-[#252525] tabular-nums">
-                      {formatRupiah(order.totalAmount)}
-                    </p>
+                <div className="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-12">
+                  <div className="space-y-3 lg:col-span-8">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#64625C]">
+                      <span>
+                        Jenis:{' '}
+                        <strong className="font-semibold text-[#252525]">
+                          {order.orderType === 'TAKEAWAY' ? 'Takeaway' : 'Dine In'}
+                        </strong>
+                      </span>
+                      {order.tableName && (
+                        <span>
+                          Meja: <strong className="font-mono font-bold text-[#1B4D3E]">{order.tableName}</strong>
+                        </span>
+                      )}
+                      <span>
+                        Penyerahan:{' '}
+                        <strong className="font-semibold text-[#252525]">
+                          {order.fulfillmentMethod === 'PICKUP_COUNTER' ? 'Pickup Counter' : 'Antar ke Meja'}
+                        </strong>
+                      </span>
+                      <span>
+                        Pembayaran: <strong className="font-semibold text-[#252525]">{paymentLabel(order.method)}</strong>
+                      </span>
+                    </div>
+
+                    {order.items && order.items.length > 0 ? (
+                      <Items order={order} />
+                    ) : (
+                      <div className="rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-4 py-3 text-xs text-[#64625C]">
+                        Rincian produk tersedia melalui tombol Detail Struk.
+                      </div>
+                    )}
                   </div>
 
-                  <div className="flex flex-col gap-2">
-                    {order.paymentStatus === 'BELUM_DIBAYAR' && (
-                      <button
-                        type="button"
-                        onClick={() => handleConfirmCashierPayment(order.id)}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] hover:bg-[#EEF4F1] transition-colors whitespace-nowrap"
-                      >
-                        <Banknote className="h-4 w-4" />
-                        <span>Konfirmasi Bayar di Kasir (Lunas)</span>
-                      </button>
-                    )}
+                  <div className="flex flex-col justify-between gap-4 lg:col-span-4 lg:border-l lg:border-[#E8E6DF] lg:pl-5">
+                    <div>
+                      <p className="text-xs text-[#64625C]">Total Pesanan (Nett)</p>
+                      <p className="mt-0.5 font-mono text-xl font-bold text-[#252525] tabular-nums">
+                        {formatRupiah(order.totalAmount)}
+                      </p>
+                    </div>
 
-                    {order.orderStatus === 'ORDER_BARU' && (
-                      <button
-                        type="button"
-                        onClick={() => handleStatusChange(order.id, 'MEMASAK')}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#1B4D3E] px-4 py-2.5 text-xs font-bold text-white hover:bg-[#143B2F] transition-colors whitespace-nowrap"
-                      >
-                        <ChefHat className="h-4 w-4" />
-                        <span>Konfirmasi & Mulai Memasak</span>
-                      </button>
-                    )}
+                    <div className="flex flex-col gap-2">
+                      {order.orderStatus === 'AWAITING_PAYMENT' && (
+                        <>
+                          <label className="text-xs font-medium text-[#64625C]">
+                            {order.method === 'CASH'
+                              ? 'Tunai diterima'
+                              : order.method === 'QRIS_DYNAMIC'
+                                ? 'Menunggu penyelesaian QRIS Otomatis (Midtrans)'
+                                : 'Bukti QRIS telah diverifikasi'}
+                          </label>
+                          {order.method === 'CASH' && (
+                            <div className="space-y-1.5">
+                              <input
+                                aria-label={`Tunai diterima ${order.customerName}`}
+                                value={cash[order.id] ?? ''}
+                                onChange={(e) => setCash((now) => ({ ...now, [order.id]: e.target.value }))}
+                                type="number"
+                                min={order.totalAmount}
+                                placeholder={formatRupiah(order.totalAmount)}
+                                className="w-full rounded-xl border border-[#E8E6DF] px-3 py-2 text-sm focus:border-[#1B4D3E] focus:outline-none"
+                              />
+                              <div className="flex flex-wrap gap-1.5">
+                                {[
+                                  { label: 'Uang Pas', amount: order.totalAmount },
+                                  ...(50000 >= order.totalAmount ? [{ label: 'Rp50rb', amount: 50000 }] : []),
+                                  ...(100000 >= order.totalAmount ? [{ label: 'Rp100rb', amount: 100000 }] : []),
+                                ].map((preset) => (
+                                  <button
+                                    key={preset.label}
+                                    type="button"
+                                    onClick={() => setCash((now) => ({ ...now, [order.id]: String(preset.amount) }))}
+                                    className="rounded-lg border border-[#E8E6DF] bg-[#FAF9F6] px-2.5 py-1 text-[11px] font-semibold text-[#1B4D3E] hover:bg-white"
+                                  >
+                                    {preset.label}
+                                  </button>
+                                ))}
+                              </div>
+                              {cashChange !== null && (
+                                <p className="text-xs font-semibold text-[#15623A]">
+                                  Kembalian: {formatRupiah(cashChange)}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                          {order.method === 'QRIS_DYNAMIC' ? (
+                            <button
+                              type="button"
+                              disabled={working === order.id}
+                              onClick={() => void reconcileDynamic(order)}
+                              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] transition-colors hover:bg-[#EEF4F1] disabled:opacity-60"
+                            >
+                              <RefreshCw className={`h-4 w-4 ${working === order.id ? 'animate-spin' : ''}`} />
+                              Cek Status Midtrans
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={working === order.id}
+                              onClick={() => void pay(order)}
+                              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#1B4D3E] bg-white px-4 py-2.5 text-xs font-bold text-[#1B4D3E] transition-colors hover:bg-[#EEF4F1] disabled:opacity-60"
+                            >
+                              <Banknote className="h-4 w-4" />
+                              Verifikasi Pembayaran
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            disabled={working === order.id}
+                            onClick={() => void cancelOrder(order)}
+                            className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-3 py-2 text-xs font-semibold text-[#A62626] transition-colors hover:bg-[#FADADA] disabled:opacity-60"
+                          >
+                            <XCircle className="h-3.5 w-3.5" />
+                            Batalkan
+                          </button>
+                        </>
+                      )}
 
-                    {order.orderStatus === 'MEMASAK' && (
-                      <button
-                        type="button"
-                        onClick={() => handleStatusChange(order.id, 'DISAJIKAN')}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#FCD804] px-4 py-2.5 text-xs font-bold text-[#252525] hover:bg-[#E5C400] transition-colors whitespace-nowrap"
-                      >
-                        <CheckCircle2 className="h-4 w-4" />
-                        <span>Tandai Disajikan</span>
-                      </button>
-                    )}
+                      {order.orderStatus === 'NEW_ORDER' && (
+                        <button
+                          type="button"
+                          disabled={working === order.id}
+                          onClick={() => void advance(order, 'IN_PROGRESS')}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#1B4D3E] px-4 py-2.5 text-xs font-bold text-white transition-colors hover:bg-[#143B2F] disabled:opacity-60"
+                        >
+                          <ChefHat className="h-4 w-4" />
+                          Proses Pesanan
+                        </button>
+                      )}
 
-                    <div className="flex items-center justify-between gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedOrderId(order.id)}
-                        className="text-xs font-semibold text-[#64625C] hover:text-[#252525]"
-                      >
-                        Detail Struk
-                      </button>
-                      <Link
-                        to={`/order-tracking/${order.id}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-[#1B4D3E] hover:underline"
-                      >
-                        <span>Halaman Tracking</span>
-                        <ExternalLink className="h-3.5 w-3.5" />
-                      </Link>
+                      {order.orderStatus === 'IN_PROGRESS' && (
+                        <button
+                          type="button"
+                          disabled={working === order.id}
+                          onClick={() => void advance(order, 'READY_TO_SERVE')}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#FCD804] px-4 py-2.5 text-xs font-bold text-[#252525] transition-colors hover:bg-[#E5C400] disabled:opacity-60"
+                        >
+                          <CheckCircle2 className="h-4 w-4" />
+                          Tandai Siap
+                        </button>
+                      )}
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={working === order.id}
+                          onClick={() => void detail(order)}
+                          className="text-xs font-semibold text-[#64625C] hover:text-[#252525] disabled:opacity-60"
+                        >
+                          {working === order.id ? 'Memuat detail…' : 'Detail Struk'}
+                        </button>
+                        {order.orderStatus !== 'AWAITING_PAYMENT' && (
+                          <button
+                            type="button"
+                            disabled={working === order.id}
+                            onClick={() => setRefundTarget(order)}
+                            className="text-xs font-semibold text-[#A62626] hover:underline disabled:opacity-60"
+                          >
+                            Refund & Batal
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       )}
 
-      {/* Order Detail Modal */}
-      {selectedOrder && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="w-full max-w-lg rounded-2xl border border-[#E8E6DF] bg-white p-6 shadow-xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-start justify-between gap-4 border-b border-[#E8E6DF] pb-4">
-              <div>
-                <p className="font-mono text-xs font-semibold text-[#1B4D3E]">
-                  {selectedOrder.id}
-                </p>
-                <h3 className="mt-0.5 text-lg font-bold text-[#252525]">
-                  Detail Pesanan — {selectedOrder.customerName}
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedOrderId(null)}
-                className="rounded-lg border border-[#E8E6DF] px-3 py-1.5 text-xs font-semibold text-[#64625C] hover:bg-[#FAF9F6]"
-              >
-                Tutup
-              </button>
-            </div>
+      <ReceiptModal receipt={selected} onClose={() => setSelected(null)} />
 
-            <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-              <div className="rounded-xl bg-[#FAF9F6] p-3">
-                <span className="text-[#64625C]">Status Pesanan</span>
-                <div className="mt-1.5">
-                  <OrderStatusBadge status={selectedOrder.orderStatus} />
-                </div>
-              </div>
-              <div className="rounded-xl bg-[#FAF9F6] p-3">
-                <span className="text-[#64625C]">Status Pembayaran & Kasir</span>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  <PaymentStatusBadge status={selectedOrder.paymentStatus} />
-                  <CashierStatusBadge status={selectedOrder.cashierStatus} />
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 space-y-2 text-xs text-[#64625C]">
-              <div className="flex justify-between">
-                <span>Waktu Order</span>
-                <span className="font-mono text-[#252525] tabular-nums">
-                  {formatDateTime(selectedOrder.createdAt)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Jenis & Penyerahan</span>
-                <span className="font-semibold text-[#252525]">
-                  {getOrderTypeLabel(selectedOrder.orderType)}
-                  {selectedOrder.tableName ? ` (Meja ${selectedOrder.tableName})` : ''} ·{' '}
-                  {getFulfillmentLabel(selectedOrder.fulfillmentMethod)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span>Metode Pembayaran</span>
-                <span className="font-semibold text-[#252525]">
-                  {getPaymentMethodLabel(
-                    selectedOrder.paymentMethod,
-                    selectedOrder.paymentSubMethod,
-                  )}
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4 border-t border-[#E8E6DF] pt-4 space-y-2.5">
-              {selectedOrder.items.map((item, i) => (
-                <div key={i} className="flex justify-between gap-3 text-sm">
-                  <div>
-                    <p className="font-semibold text-[#252525]">
-                      {item.quantity}x {item.productName}
-                    </p>
-                    <p className="text-xs text-[#64625C]">
-                      {[
-                        ...item.selectedVariants.map((v) => v.optionLabel),
-                        ...item.selectedToppings.map((t) => `+ ${t.name}`),
-                      ].join(' · ')}
-                    </p>
-                    {item.notes && (
-                      <p className="text-xs italic text-[#64625C]">"{item.notes}"</p>
-                    )}
-                  </div>
-                  <span className="font-mono text-sm font-semibold text-[#252525] tabular-nums shrink-0">
-                    {formatRupiah(item.subtotal)}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 border-t border-[#E8E6DF] pt-4 flex items-center justify-between">
-              <span className="text-sm font-bold text-[#252525]">Total Nett</span>
-              <span className="font-mono text-lg font-extrabold text-[#1B4D3E] tabular-nums">
-                {formatRupiah(selectedOrder.totalAmount)}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
+      <ConfirmModal
+        open={Boolean(refundTarget)}
+        title={`Refund & batalkan pesanan ${refundTarget?.customerName ?? ''}?`}
+        description="Status pembayaran pesanan ini akan diubah menjadi Dikembalikan (Refunded) dan dikeluarkan dari antrean barista."
+        confirmLabel="Ya, Refund & Batalkan"
+        destructive
+        onCancel={() => setRefundTarget(null)}
+        onConfirm={() => {
+          if (refundTarget) void cancelOrder(refundTarget);
+          setRefundTarget(null);
+        }}
+      />
     </div>
   );
 };

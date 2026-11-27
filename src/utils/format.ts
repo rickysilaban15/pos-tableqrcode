@@ -65,6 +65,9 @@ export function buildTableQrUrl(
   table: Pick<CafeTable, 'name' | 'token'>,
 ): string {
   const cleanBase = normalizeBaseUrl(baseUrl);
+  if (table.token && !table.token.startsWith('LRS-')) {
+    return `${cleanBase}/q/${encodeURIComponent(table.token)}`;
+  }
   const slug = encodeURIComponent(storeSlug || 'laris-coffee');
   const params = new URLSearchParams({
     table: table.name,
@@ -114,7 +117,9 @@ export function getQrUrlWarning(
 export function getPaymentMethodLabel(method: PaymentMethod, subMethod?: string): string {
   switch (method) {
     case 'QRIS':
-      return 'QRIS';
+      return 'QRIS Statis';
+    case 'QRIS_DYNAMIC':
+      return 'QRIS Otomatis';
     case 'E_WALLET':
       return subMethod ? `E-Wallet (${subMethod})` : 'E-Wallet';
     case 'BANK_TRANSFER':

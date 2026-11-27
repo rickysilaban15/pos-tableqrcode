@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    platform: linux/arm64/v8
+    environment:
+      POSTGRES_DB: laris_pos
+      POSTGRES_USER: laris
+      POSTGRES_PASSWORD: laris_local_only
+    # 5433 avoids an existing local PostgreSQL on 5432 while remaining loopback-only.
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U laris -d laris_pos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes: { postgres_data: {} }

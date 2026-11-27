@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, QrCode, CheckCircle2, ChefHat } from 'lucide-react';
-import { usePos } from '../../context/PosContext';
+import { ArrowRight, QrCode, CheckCircle2, ChefHat, Banknote, Calculator, Plus } from 'lucide-react';
+import type { ActivityLog, CafeTable, Order } from '../../types/pos';
 import {
   formatRupiah,
   formatTime,
@@ -14,31 +14,113 @@ import {
   PaymentStatusBadge,
 } from '../../components/StatusBadge';
 
-export const AdminDashboardPage: React.FC = () => {
-  const { state, updateOrderStatus, pushToast } = usePos();
+type DashboardOrder = Order & {
+  itemCount?: number;
+  rawOrderStatus: 'AWAITING_PAYMENT' | 'NEW_ORDER' | 'IN_PROGRESS' | 'READY_TO_SERVE';
+};
 
-  const totalOrders = state.orders.length;
-  const newOrders = state.orders.filter((o) => o.orderStatus === 'ORDER_BARU').length;
-  const cookingOrders = state.orders.filter((o) => o.orderStatus === 'MEMASAK').length;
-  const servedOrders = state.orders.filter((o) => o.orderStatus === 'DISAJIKAN').length;
-  const simulatedRevenue = state.orders
-    .filter((o) => o.paymentStatus === 'LUNAS' || o.cashierStatus === 'SELESAI')
-    .reduce((sum, o) => sum + o.totalAmount, 0);
+export const AdminDashboardPage: React.FC = () => {
+  const [state, setState] = useState<{ orders: DashboardOrder[]; activities: ActivityLog[]; tables: CafeTable[] }>({ orders: [], activities: [], tables: [] });
+  const [revenue, setRevenue] = useState(0);
+  const [metrics, setMetrics] = useState({ totalOrders: 0, awaitingPaymentOrders: 0, newOrders: 0, inProgressOrders: 0, readyOrders: 0, sandboxOrdersToday: 0, sandboxGrossToday: 0 });
+  const [error, setError] = useState('');
+  const [onboarding, setOnboarding] = useState<{ profileConfigured: boolean; hasCategory: boolean; hasProduct: boolean; hasTableWithQr: boolean; hasPaidOrder: boolean; firstQrToken: string | null } | null>(null);
+
+  const hasConnectedOnce = useRef(false);
+  const load = useCallback(async () => {
+    const response = await fetch('/api/v1/orders/dashboard');
+    const data = await response.json();
+    if (!response.ok) { setError(data?.error || 'Dashboard tidak dapat dimuat.'); return; }
+    const orders: DashboardOrder[] = data.recentOrders.map((order: { id: string; customerName: string; totalAmount: number; orderStatus: 'AWAITING_PAYMENT' | 'NEW_ORDER' | 'IN_PROGRESS' | 'READY_TO_SERVE'; paymentStatus: string; createdAt: string; orderType: 'DINE_IN' | 'TAKEAWAY'; fulfillmentMethod: 'TABLE_SERVICE' | 'PICKUP_COUNTER'; tableName?: string; method: 'CASH' | 'QRIS'; itemCount: number }) => ({
+      id: order.id, createdAt: order.createdAt, updatedAt: order.createdAt, customerName: order.customerName,
+      orderType: order.orderType, fulfillmentMethod: order.fulfillmentMethod, tableName: order.tableName,
+      totalAmount: order.totalAmount, paymentMethod: order.method === 'CASH' ? 'CASHIER' as const : 'QRIS' as const,
+      paymentStatus: order.paymentStatus === 'PAID' ? 'LUNAS' as const : 'BELUM_DIBAYAR' as const,
+      orderStatus: order.orderStatus === 'IN_PROGRESS' ? 'MEMASAK' as const : order.orderStatus === 'READY_TO_SERVE' ? 'DISAJIKAN' as const : 'ORDER_BARU' as const,
+      cashierStatus: order.orderStatus === 'READY_TO_SERVE' ? 'SELESAI' as const : 'AKTIF' as const,
+      rawOrderStatus: order.orderStatus,
+      items: [], itemCount: order.itemCount,
+    }));
+    setState({
+      orders,
+      tables: Array.from({ length: data.tables.total }, (_, index) => ({ id: String(index), name: '', area: '', token: '', isActive: index < data.tables.active, createdAt: '', updatedAt: '' })),
+      activities: orders.slice(0, 7).map((order) => ({
+        id: order.id,
+        timestamp: order.createdAt,
+        message: `${order.customerName} · ${
+          order.rawOrderStatus === 'AWAITING_PAYMENT'
+            ? 'menunggu verifikasi pembayaran'
+            : order.rawOrderStatus === 'READY_TO_SERVE'
+              ? 'pesanan siap disajikan'
+              : order.rawOrderStatus === 'IN_PROGRESS'
+                ? 'pesanan sedang diproses'
+                : 'pesanan lunas masuk antrean'
+        }`,
+        orderId: order.id,
+      })),
+    });
+    setRevenue(data.metrics.revenue);
+    setMetrics({
+      totalOrders: data.metrics.totalOrders ?? 0,
+      awaitingPaymentOrders: data.metrics.awaitingPaymentOrders ?? 0,
+      newOrders: data.metrics.newOrders ?? 0,
+      inProgressOrders: data.metrics.inProgressOrders ?? 0,
+      readyOrders: data.metrics.readyOrders ?? 0,
+      sandboxOrdersToday: data.metrics.sandboxOrdersToday ?? 0,
+      sandboxGrossToday: data.metrics.sandboxGrossToday ?? 0,
+    });
+    setOnboarding(data.onboarding ?? null);
+    setError('');
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource('/api/v1/events');
+    const refresh = () => { void load(); };
+    es.addEventListener('connected', () => {
+      if (hasConnectedOnce.current) void load();
+      hasConnectedOnce.current = true;
+    });
+    ['order:created', 'payment:confirmed', 'order:updated', 'order:cancelled', 'order:refunded', 'order:expired'].forEach((ev) => {
+      es.addEventListener(ev, refresh);
+    });
+    return () => { es.close(); };
+  }, [load]);
+
+  const totalOrders = metrics.totalOrders;
+  const newOrders = metrics.newOrders;
+  const cookingOrders = metrics.inProgressOrders;
+  const servedOrders = metrics.readyOrders;
+  const simulatedRevenue = revenue;
 
   const recentOrders = state.orders.slice(0, 6);
 
   const handleQuickAdvance = async (orderId: string, nextStatus: 'MEMASAK' | 'DISAJIKAN') => {
-    await updateOrderStatus(orderId, nextStatus);
-    pushToast(
-      nextStatus === 'MEMASAK'
-        ? `${orderId} dipindahkan ke Memasak`
-        : `${orderId} ditandai Disajikan & Kasir Selesai`,
-      'success',
-    );
+    const response = await fetch(`/api/v1/orders/${orderId}/status`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: nextStatus === 'MEMASAK' ? 'IN_PROGRESS' : 'READY_TO_SERVE' }) });
+    if (!response.ok) { const data = await response.json(); setError(data?.error || 'Status pesanan tidak dapat diperbarui.'); return; }
+    await load();
   };
 
   return (
     <div className="space-y-6">
+      {error && <div role="alert" className="rounded-xl border border-[#F6C5C5] bg-[#FDECEC] px-4 py-3 text-sm text-[#A62626]">{error}</div>}
+      {metrics.awaitingPaymentOrders > 0 && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-[#F6D3AE] bg-[#FEF3E6] px-4 py-3 text-xs text-[#7C4106]">
+          <div className="flex items-center gap-2.5 font-semibold">
+            <Banknote className="h-4 w-4 shrink-0 text-[#9A520A]" />
+            <span>
+              Ada <strong>{metrics.awaitingPaymentOrders} pesanan</strong> yang menunggu verifikasi pembayaran sebelum masuk antrean barista.
+            </span>
+          </div>
+          <Link
+            to="/admin/orders"
+            className="inline-flex items-center gap-1.5 self-start sm:self-auto rounded-lg bg-[#1B4D3E] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#143B2F]"
+          >
+            <span>Verifikasi Sekarang</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+      )}
       {/* KPI Strip — Responsive 2 -> 3 -> 5 columns */}
       <section className="grid grid-cols-2 gap-3.5 sm:grid-cols-3 xl:grid-cols-5 sm:gap-4">
         <div className="rounded-2xl border border-[#E8E6DF] bg-white p-4 sm:p-5">
@@ -74,11 +156,15 @@ export const AdminDashboardPage: React.FC = () => {
         </div>
 
         <div className="col-span-2 sm:col-span-2 xl:col-span-1 rounded-2xl border border-[#1B4D3E] bg-[#1B4D3E] p-4 sm:p-5 text-white">
-          <p className="text-xs font-medium text-white/75">Omzet Simulasi (Nett)</p>
+          <p className="text-xs font-medium text-white/75">Omzet Hari Ini (Nett)</p>
           <p className="mt-2 font-mono text-2xl font-bold text-[#FCD804] tabular-nums">
             {formatRupiah(simulatedRevenue)}
           </p>
-          <p className="mt-1 text-xs text-white/75">Lunas & selesai</p>
+          <p className="mt-1 text-xs text-white/75">
+            {metrics.sandboxOrdersToday > 0
+              ? `Riil · +${metrics.sandboxOrdersToday} uji Sandbox (${formatRupiah(metrics.sandboxGrossToday)})`
+              : 'Lunas & selesai'}
+          </p>
         </div>
       </section>
 
@@ -143,10 +229,27 @@ export const AdminDashboardPage: React.FC = () => {
 
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <OrderStatusBadge status={order.orderStatus} />
-                        <CashierStatusBadge status={order.cashierStatus} />
+                        {order.rawOrderStatus === 'AWAITING_PAYMENT' ? (
+                          <span className="inline-flex items-center rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2.5 py-1 text-xs font-semibold text-[#9A520A]">
+                            Menunggu Verifikasi
+                          </span>
+                        ) : (
+                          <>
+                            <OrderStatusBadge status={order.orderStatus} />
+                            <CashierStatusBadge status={order.cashierStatus} />
+                          </>
+                        )}
                       </div>
-                      {order.orderStatus === 'ORDER_BARU' && (
+                      {order.rawOrderStatus === 'AWAITING_PAYMENT' && (
+                        <Link
+                          to="/admin/orders"
+                          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-[#1B4D3E] bg-white px-3 py-1.5 text-xs font-bold text-[#1B4D3E] hover:bg-[#EEF4F1]"
+                        >
+                          <Banknote className="h-3.5 w-3.5" />
+                          <span>Verifikasi Bayar</span>
+                        </Link>
+                      )}
+                      {order.rawOrderStatus === 'NEW_ORDER' && (
                         <button
                           type="button"
                           onClick={() => void handleQuickAdvance(order.id, 'MEMASAK')}
@@ -156,7 +259,7 @@ export const AdminDashboardPage: React.FC = () => {
                           <span>Mulai Masak</span>
                         </button>
                       )}
-                      {order.orderStatus === 'MEMASAK' && (
+                      {order.rawOrderStatus === 'IN_PROGRESS' && (
                         <button
                           type="button"
                           onClick={() => void handleQuickAdvance(order.id, 'DISAJIKAN')}
@@ -192,7 +295,7 @@ export const AdminDashboardPage: React.FC = () => {
                           </div>
                           <div className="mt-0.5 font-mono text-xs text-[#64625C] tabular-nums">
                             {formatTime(order.createdAt)} ·{' '}
-                            {order.items.reduce((s, i) => s + i.quantity, 0)} item
+                            {order.itemCount ?? order.items.reduce((s, i) => s + i.quantity, 0)} item
                           </div>
                         </td>
                         <td className="px-4 py-3.5 align-top">
@@ -215,12 +318,29 @@ export const AdminDashboardPage: React.FC = () => {
                         </td>
                         <td className="px-4 py-3.5 align-top">
                           <div className="flex flex-col items-start gap-1">
-                            <OrderStatusBadge status={order.orderStatus} />
-                            <CashierStatusBadge status={order.cashierStatus} />
+                            {order.rawOrderStatus === 'AWAITING_PAYMENT' ? (
+                              <span className="inline-flex items-center rounded-md border border-[#F6D3AE] bg-[#FEF3E6] px-2.5 py-1 text-xs font-semibold text-[#9A520A] whitespace-nowrap">
+                                Menunggu Verifikasi
+                              </span>
+                            ) : (
+                              <>
+                                <OrderStatusBadge status={order.orderStatus} />
+                                <CashierStatusBadge status={order.cashierStatus} />
+                              </>
+                            )}
                           </div>
                         </td>
                         <td className="px-6 py-3.5 align-top text-right">
-                          {order.orderStatus === 'ORDER_BARU' && (
+                          {order.rawOrderStatus === 'AWAITING_PAYMENT' && (
+                            <Link
+                              to="/admin/orders"
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-[#1B4D3E] bg-white px-3 py-1.5 text-xs font-bold text-[#1B4D3E] hover:bg-[#EEF4F1] transition-colors whitespace-nowrap"
+                            >
+                              <Banknote className="h-3.5 w-3.5" />
+                              <span>Verifikasi Bayar</span>
+                            </Link>
+                          )}
+                          {order.rawOrderStatus === 'NEW_ORDER' && (
                             <button
                               type="button"
                               onClick={() => void handleQuickAdvance(order.id, 'MEMASAK')}
@@ -230,7 +350,7 @@ export const AdminDashboardPage: React.FC = () => {
                               <span>Mulai Masak</span>
                             </button>
                           )}
-                          {order.orderStatus === 'MEMASAK' && (
+                          {order.rawOrderStatus === 'IN_PROGRESS' && (
                             <button
                               type="button"
                               onClick={() => void handleQuickAdvance(order.id, 'DISAJIKAN')}
@@ -240,13 +360,10 @@ export const AdminDashboardPage: React.FC = () => {
                               <span>Tandai Disajikan</span>
                             </button>
                           )}
-                          {order.orderStatus === 'DISAJIKAN' && (
-                            <Link
-                              to={`/order-tracking/${order.id}`}
-                              className="text-xs font-semibold text-[#64625C] hover:text-[#1B4D3E] whitespace-nowrap"
-                            >
-                              Lihat Tracking
-                            </Link>
+                          {order.rawOrderStatus === 'READY_TO_SERVE' && (
+                            <span className="text-xs font-semibold text-[#64625C] whitespace-nowrap">
+                              Pesanan selesai
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -258,8 +375,28 @@ export const AdminDashboardPage: React.FC = () => {
           )}
         </section>
 
-        {/* Right Column: Activity Feed & QR Shortcut */}
+        {/* Right Column: Quick Shortcuts, Activity Feed & QR Shortcut */}
         <div className="xl:col-span-4 space-y-6">
+          <section className="rounded-2xl border border-[#E8E6DF] bg-white p-5 sm:p-6">
+            <h2 className="text-sm font-bold text-[#252525] mb-3">Aksi Cepat Operasional</h2>
+            <div className="grid grid-cols-2 gap-2.5">
+              <Link
+                to="/admin/pos"
+                className="flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-2.5 text-xs font-bold text-[#1B4D3E] hover:border-[#1B4D3E]/40 hover:bg-white transition-colors"
+              >
+                <Calculator className="h-4 w-4 shrink-0" />
+                <span>Buka Kasir POS</span>
+              </Link>
+              <Link
+                to="/admin/menu"
+                className="flex items-center gap-2 rounded-xl border border-[#E8E6DF] bg-[#FAF9F6] px-3 py-2.5 text-xs font-bold text-[#1B4D3E] hover:border-[#1B4D3E]/40 hover:bg-white transition-colors"
+              >
+                <Plus className="h-4 w-4 shrink-0" />
+                <span>Kelola Produk</span>
+              </Link>
+            </div>
+          </section>
+
           <section className="rounded-2xl border border-[#E8E6DF] bg-white p-5 sm:p-6">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-base font-bold text-[#252525]">Ringkasan Aktivitas</h2>
@@ -302,6 +439,36 @@ export const AdminDashboardPage: React.FC = () => {
               </div>
             </div>
           </section>
+
+          {/* Quick Setup Checklist — shown when no orders yet */}
+          {onboarding && !(onboarding.profileConfigured && onboarding.hasCategory && onboarding.hasProduct && onboarding.hasTableWithQr && onboarding.hasPaidOrder) && (
+            <section className="rounded-2xl border border-[#FCD804]/60 bg-[#FFFDE7] p-5 sm:p-6">
+              <h3 className="text-sm font-bold text-[#252525] mb-1">Mulai dalam 5 langkah</h3>
+              <p className="text-xs text-[#5C5952] mb-3">Progres dihitung dari data outlet Anda yang tersimpan.</p>
+              <ul className="space-y-2.5">
+                {[
+                  { to: '/admin/settings', text: 'Lengkapi profil outlet, logo, atau QRIS', done: onboarding.profileConfigured },
+                  { to: '/admin/categories', text: 'Buat kategori menu (Kopi, Makanan, dll.)', done: onboarding.hasCategory },
+                  { to: '/admin/menu', text: 'Tambah produk dan harga', done: onboarding.hasProduct },
+                  { to: '/admin/tables', text: 'Tambah meja dan cetak QR Code', done: onboarding.hasTableWithQr },
+                  { to: onboarding.firstQrToken ? `/q/${onboarding.firstQrToken}` : '/admin/tables', text: 'Terima dan verifikasi pesanan lunas pertama', done: onboarding.hasPaidOrder },
+                ].map((item, idx) => (
+                  <li key={idx}>
+                    <Link
+                      to={item.to}
+                      className={`flex items-center gap-2.5 text-xs font-semibold transition-colors ${item.done ? 'text-[#15623A]' : 'text-[#1B4D3E] hover:underline'}`}
+                    >
+                      <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${item.done ? 'bg-[#1B4D3E] text-white' : 'bg-white border border-[#1B4D3E]/40 text-[#1B4D3E]'}`}>
+                        {item.done ? '✓' : idx + 1}
+                      </span>
+                      {item.text}
+                      {!item.done && <ArrowRight className="h-3 w-3 ml-auto" />}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
       </div>
     </div>
