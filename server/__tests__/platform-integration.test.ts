@@ -95,6 +95,8 @@ beforeAll(async () => {
   // Clean isolated database tables
   await pool.query(`
     TRUNCATE
+      payment_webhook_events,
+      subscription_invoices,
       legacy_qr_mappings,
       audit_logs,
       payments,
